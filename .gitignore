@@ -1,0 +1,22 @@
+# Compiled binaries
+/bin/
+
+# Runtime data written by nodes (recreated on every experiment)
+/data/
+
+# Raw logs; evidence worth keeping is copied to evidence/
+/logs/*.log
+
+# Test audio/video: do not commit copyrighted content
+/media/
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.mp4
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
