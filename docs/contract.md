@@ -1,6 +1,6 @@
 # Contrato de comportamiento
 
-Este documento fija qué puede hacer quien usa drop-the-node y qué le promete el sistema en cada caso, también cuando hay almacenes caídos o lentos. Describe solo lo que se ve desde fuera: no menciona Ray, actores, procesos ni la forma de replicar. Por eso vale igual para el prototipo y para la versión nativa, y cualquier cambio interno debe seguir cumpliéndolo.
+Este documento fija qué puede hacer quien usa drop-the-node y qué le promete el sistema en cada caso, también cuando hay almacenes caídos o lentos. La sección 7 fija además la interfaz entre el cliente y cada almacén. Describe solo lo que se ve desde fuera: no menciona Ray, actores, procesos ni la forma de replicar. Por eso vale igual para el prototipo y para la versión nativa, y cualquier cambio interno debe seguir cumpliéndolo.
 
 Cada promesa sale de una decisión de [`decisions.md`](decisions.md), que explica el porqué. El contrato no toma decisiones propias: si una promesa necesita una decisión, esta está en `decisions.md`.
 
@@ -290,7 +290,89 @@ Toda salida tiene también una versión en JSON (`--json`) para procesarla en lo
 
 ---
 
-## 7. Correspondencia con `decisions.md`
+## 7. Interfaz de un almacén
+
+Las secciones anteriores describen lo que ve quien usa el sistema. Esta describe la frontera entre el cliente y cada almacén, que tampoco cambia entre fases. En el prototipo son métodos de un actor; en la versión nativa, peticiones por la red. Su significado y sus errores son los mismos en ambos casos. La usan la biblioteca del cliente y el agente de reparación, nunca una persona.
+
+### 7.1 Reglas comunes
+
+- **Identificadores.** Todo `id` o `track_id` debe tener la forma de un SHA-256 en hexadecimal y en minúsculas. Si no la tiene: `Invalid`, antes de tocar el disco.
+- **Integridad.** Un almacén nunca entrega un objeto cuyo hash no coincide con su identificador (ver «Cómo se detecta la corrupción»).
+- **Saturación.** Con `DTN_STORE_CONCURRENCY` peticiones en curso, la siguiente se rechaza en el acto con `Unavailable`, indicando saturación (ver «Qué hace un almacén cuando está al máximo de peticiones»).
+- **Registro.** Toda petición lleva el identificador de la operación que la origina. El almacén registra su llegada antes de procesarla y su respuesta después, con su nombre lógico (principio P7).
+- **Repetición segura.** Todas las operaciones de esta interfaz se pueden repetir sin cambiar el resultado.
+
+### 7.2 Operaciones
+
+#### `put(id, data) → {stored: "new" | "existing"}`
+
+Guarda un objeto.
+
+1. Si `sha256(data) ≠ id`: `Invalid`, y no se escribe nada.
+2. Si el almacén ya tiene el objeto y su copia es válida, no lo reescribe: renueva su antigüedad y responde `existing` (ver «Qué se hace con los objetos que nadie usa»).
+3. Si no lo tiene, o su copia estaba dañada, lo escribe en un archivo temporal, fuerza la escritura, lo renombra y fuerza la carpeta. Solo entonces responde `new` (ver «Cómo guarda un almacén sus objetos»).
+4. Si el objeto es un manifiesto o una lápida, lo añade a su índice (ver «Cómo se escriben los manifiestos y las lápidas»).
+
+| Error | Cuándo |
+|---|---|
+| `Invalid` | `id` mal formado, o `data` no corresponde a `id`. |
+| `Unavailable` | Saturación o error de disco. El objeto puede haber quedado guardado; repetir es seguro. |
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Si `put` responde, el objeto sobrevive a la caída y el reinicio del almacén. |
+
+#### `get(id) → data`
+
+Entrega un objeto.
+
+| Resultado | Cuándo |
+|---|---|
+| `data` | El almacén tiene el objeto y su hash coincide. |
+| `NotFound` | No lo tiene, o lo tenía en cuarentena. |
+| `Corrupt` | Lo tenía, pero al leerlo el hash no coincide. Lo aparta a cuarentena antes de responder, así que la siguiente petición recibe `NotFound`. |
+| `Invalid` | `id` mal formado. |
+| `Unavailable` | Saturación o error de disco. |
+
+#### `inventory() → [{id, bytes, age_seconds}]`
+
+Lista los objetos que guarda: su tamaño y el tiempo desde su última escritura, medido por el propio almacén. No incluye los objetos en cuarentena. Es una foto: un objeto escrito mientras se responde puede aparecer o no. La usa el agente de reparación (ver «Cómo se recupera la redundancia perdida»).
+
+#### `search(query) → {manifests: [{track_id, manifest}], tombstoned: [track_id]}`
+
+Aplica la regla de búsqueda a sus manifiestos (ver «Cómo se busca una pista») y devuelve los que coinciden, cada uno con su identificador. Devuelve además los `track_id` de **todas** las lápidas que guarda, porque la lápida de una pista puede estar en un almacén distinto de su manifiesto. Comprueba el hash de cada manifiesto antes de devolverlo y aparta los dañados.
+
+| Error | Cuándo |
+|---|---|
+| `Invalid` | Consulta de más de 200 caracteres. |
+| `Unavailable` | Saturación. |
+
+#### `tombstones(track_id) → [tombstone]`
+
+Devuelve las lápidas que guarda para esa pista, normalmente ninguna o una. Una lista vacía es una respuesta válida, no un error: significa «yo no tengo ninguna». El cliente decide con la regla de «Cómo encuentra el cliente la lápida de una pista».
+
+#### `delete_if_older(id, seconds) → {deleted: bool, reason: "deleted" | "recent" | "absent"}`
+
+Borra el objeto solo si su última escritura es más antigua que `seconds`. La comprobación y el borrado se hacen sin que ninguna escritura del mismo objeto pueda colarse entre ambos (ver «Cómo borra un almacén un objeto sin uso»). Solo la usa el agente de reparación.
+
+| Resultado | Significado |
+|---|---|
+| `deleted` | Se borró. |
+| `recent` | Se conservó, porque se escribió hace menos de `seconds`. |
+| `absent` | No lo tenía. Repetir un borrado ya hecho da este resultado. |
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Un objeto escrito hace menos de `seconds` nunca se borra. |
+| Supuesto | El reloj del sistema de cada almacén no retrocede: la antigüedad se calcula con la hora de la última escritura guardada en disco, que tiene que sobrevivir a los reinicios. |
+
+#### `ping() → {store, incarnation, objects}`
+
+Responde con su nombre lógico, un identificador de esta ejecución del proceso, que cambia en cada reinicio (solo para diagnóstico, principio P1), y el número de objetos que guarda. No toca el disco. La usan el detector de fallos para readmitir almacenes sospechosos y los guiones de diagnóstico (ver «Cómo se detecta que un almacén falla»).
+
+---
+
+## 8. Correspondencia con `decisions.md`
 
 | Parte del contrato | Secciones de `decisions.md` |
 |---|---|
@@ -303,3 +385,4 @@ Toda salida tiene también una versión en JSON (`--json`) para procesarla en lo
 | § 3.4 `withdraw` | «Cómo se retira una pista», «Quién puede retirar una pista», «Cuándo se responde «no existe» y cuándo «no disponible»» |
 | § 4 Resumen | «Cuántas copias guardar de cada objeto y en cuántos almacenes», «En qué almacenes se coloca cada réplica» |
 | § 6 Línea de comandos | «Cómo se usa el sistema desde fuera» |
+| § 7 Interfaz de un almacén | «Qué interfaz se ofrece», «Cómo guarda un almacén sus objetos», «Cómo se detecta la corrupción», «Cómo se escriben los manifiestos y las lápidas», «Cómo encuentra el cliente la lápida de una pista», «Qué hace un almacén cuando está al máximo de peticiones», «Cómo borra un almacén un objeto sin uso», «Cómo se recupera la redundancia perdida» |

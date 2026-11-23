@@ -167,6 +167,35 @@ Si en el futuro hiciera falta editar metadatos, esta decisión dejaría de ser c
 
 ---
 
+## Cómo se escriben los manifiestos y las lápidas
+
+### El problema
+
+El identificador de una pista es el hash de su manifiesto, y el de una lápida, el hash de su contenido. Si dos clientes escriben el mismo manifiesto con bytes distintos (otro orden de los campos, otros espacios, otra forma de escribir un número), obtienen identificadores distintos para la misma pista, y la repetición segura de una subida deja de funcionar. Además, cada almacén tiene que distinguir manifiestos y lápidas de los segmentos para poder buscar entre ellos.
+
+### Posibles soluciones
+
+**JSON sin más reglas.** Fácil de leer y de escribir, pero el mismo contenido admite muchas escrituras distintas.
+
+**Un formato binario propio.** Una sola forma de escribir cada contenido, pero hay que programar y documentar el formato, y deja de poder leerse a simple vista.
+
+**JSON canónico:** claves ordenadas, sin espacios, en UTF-8, con números enteros o decimales escritos siempre igual. Se lee a simple vista y el mismo contenido produce siempre los mismos bytes.
+
+### Decisión
+
+**JSON canónico, con un campo `type` que distingue manifiestos y lápidas.**
+
+- Claves en orden alfabético, sin espacios, codificado en UTF-8. Las duraciones se guardan en milisegundos enteros, para no depender de cómo se escriben los decimales.
+- **Manifiesto:** `{"artist", "duration_ms", "init", "license", "original", "segments": [{"duration_ms", "id"}, …], "title", "type": "manifest", "version": 1}`.
+- **Lápida:** `{"reason", "track_id", "type": "tombstone", "version": 1}`.
+- Al guardar un objeto, el almacén intenta leerlo como JSON con un `type` conocido. Si lo consigue, lo añade a su índice de manifiestos o de lápidas; si no, es un segmento o un original, y lo trata como bytes opacos.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | El mismo contenido de un manifiesto o de una lápida produce siempre el mismo identificador, lo escriba el cliente que lo escriba. |
+
+---
+
 ## Cómo se busca una pista
 
 ### El problema
@@ -313,6 +342,33 @@ Retirar es definitivo. Si cualquiera puede hacerlo, cualquiera puede borrar del 
 | Tipo | Declaración |
 |---|---|
 | Límite | Cualquiera que use el sistema puede retirar cualquier pista. |
+
+---
+
+## Cómo encuentra el cliente la lápida de una pista
+
+### El problema
+
+Antes de reproducir, y antes de confirmar una subida, el cliente tiene que saber si una pista está retirada. Pero el identificador de la lápida es el hash de su contenido, que incluye el motivo, así que el cliente no lo conoce: solo conoce el identificador de la pista.
+
+### Posibles soluciones
+
+**Buscar en todo el catálogo y filtrar.** Reutiliza `search`, pero trae todos los manifiestos de todos los almacenes para responder una pregunta sobre una sola pista.
+
+**Calcular el identificador de la lápida.** Solo es posible si la lápida no lleva motivo ni ningún otro dato variable, y entonces se pierde el motivo de la retirada.
+
+**Una consulta por identificador de pista.** Cada almacén indexa sus lápidas por el `track_id` que contienen (ver «Cómo se escriben los manifiestos y las lápidas») y responde si tiene alguna para esa pista. El cliente pregunta a todos los almacenes a la vez, con plazo.
+
+### Decisión
+
+**Una consulta por identificador de pista, `tombstones(track_id)`, enviada a todos los almacenes.**
+
+- Basta con que un almacén responda con una lápida válida (su hash coincide y su `track_id` es el pedido) para que la pista esté retirada.
+- Si ninguno la tiene, la pista solo se considera no retirada si no respondieron menos de N almacenes, con la misma regla que en «Cuándo se responde «no existe» y cuándo «no disponible»». En otro caso, la operación responde `Unavailable`.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con como mucho 2 almacenes caídos, el cliente nunca toma por vigente una pista cuya retirada se confirmó. |
 
 ---
 
@@ -738,6 +794,30 @@ Un almacén sigue siendo un programa concurrente normal. Si atiende una petició
 
 ---
 
+## Qué hace un almacén cuando está al máximo de peticiones
+
+### El problema
+
+Un almacén atiende como mucho `DTN_STORE_CONCURRENCY` peticiones a la vez. Hay que decidir qué pasa con la siguiente.
+
+### Posibles soluciones
+
+**Ponerla en cola.** No se rechaza nada, pero la cola puede crecer sin límite, y el cliente no distingue un almacén saturado de uno lento: espera hasta que vence su plazo.
+
+**Cola acotada, y rechazar cuando se llena.** Absorbe ráfagas cortas, pero añade un parámetro más y sigue haciendo esperar.
+
+**Rechazar en el acto con `Unavailable`.** El cliente se entera enseguida y pide a otra réplica, que es lo que ya hace ante cualquier fallo. La carga se reparte sola entre réplicas.
+
+### Decisión
+
+**Rechazar en el acto con `Unavailable`, indicando que el motivo es saturación.** El cliente lo trata como cualquier otro `Unavailable`: pide a otra réplica y, si reintenta en el mismo almacén, lo hace con espera exponencial (ver «Qué hace el reproductor cuando una lectura falla»). Un rechazo por saturación no cuenta como fallo para el detector: el almacén está vivo y responde rápido.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Un almacén nunca tiene más de `DTN_STORE_CONCURRENCY` peticiones en curso. |
+
+---
+
 ## Qué interfaz se ofrece
 
 ### El problema
@@ -766,7 +846,7 @@ Biblioteca del cliente:
 
 **Resultado completo:** una búsqueda es completa si los almacenes que no respondieron son menos de N. Así, cada manifiesto tiene al menos una réplica entre los que sí respondieron, y el cliente puede afirmarlo sin consultar nada más. El comportamiento con almacenes inaccesibles queda así expresado en la propia interfaz.
 
-Interfaz interna de cada almacén: `put(id, data)`, `get(id)`, `inventory()`, `search(query)` y `ping()`.
+Interfaz interna de cada almacén: `put(id, data)`, `get(id)`, `inventory()`, `search(query)`, `tombstones(track_id)`, `delete_if_older(id, seconds)` y `ping()`. Las dos penúltimas salen de «Cómo encuentra el cliente la lápida de una pista» y «Cómo borra un almacén un objeto sin uso». La especificación de cada una está en [`contract.md`](contract.md).
 
 La validación de metadatos y la función de búsqueda `matches(metadata, query)` son funciones puras. Cada almacén ejecuta `matches` sobre sus manifiestos, y ambas se desarrollan sin depender de cómo se guardan ni se replican los objetos.
 
@@ -903,6 +983,30 @@ Los objetos de una pista retirada, o de una subida abandonada, ocupan espacio in
 |---|---|
 | Corrección | Un objeto referenciado por una pista vigente nunca se borra. |
 | Supuesto | Toda subida termina antes de `DTN_GC_GRACE_SECONDS`. |
+
+---
+
+## Cómo borra un almacén un objeto sin uso
+
+### El problema
+
+La limpieza decide qué objetos no usa nadie y los borra (ver «Qué se hace con los objetos que nadie usa»). Entre la decisión del agente y el borrado pasa tiempo, y en ese intervalo una subida puede volver a escribir el objeto, renovando su antigüedad, porque lo necesita. Si el borrado no lo tiene en cuenta, borra un objeto que una subida en curso acaba de confirmar.
+
+### Posibles soluciones
+
+**Borrado incondicional, `delete(id)`.** Simple, pero sufre exactamente la carrera descrita.
+
+**Bloquear las subidas durante la limpieza.** Evita la carrera, pero detiene el servicio y exige coordinar a todos los clientes con el agente.
+
+**Borrado condicional, `delete_if_older(id, seconds)`.** El almacén borra el objeto solo si, en el momento de borrar, su última escritura es más antigua que `seconds`. La comprobación y el borrado se hacen bajo el cerrojo del índice, así que ninguna escritura del mismo objeto puede colarse entre ambos. La antigüedad la mide el propio almacén con su reloj, así que no hay que comparar relojes de procesos distintos.
+
+### Decisión
+
+**Borrado condicional, `delete_if_older(id, seconds)`, con `seconds = DTN_GC_GRACE_SECONDS`.** Si el objeto fue reescrito después de que el agente decidiera borrarlo, el almacén no lo borra y responde que se conservó.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Un objeto escrito hace menos de `DTN_GC_GRACE_SECONDS` nunca se borra. |
 
 ---
 
