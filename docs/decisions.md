@@ -36,7 +36,7 @@ Metadatos mínimos de una pista:
 | `title` | Título. |
 | `artist` | Autor o intérprete. |
 | `duration` | Duración en segundos, calculada al subir a partir de los segmentos de audio. |
-| `license` | Licencia, obligatoria y de una lista cerrada. Una subida sin licencia válida se rechaza con `Invalid`. |
+| `license` | Licencia, obligatoria y de una lista cerrada: `CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`, `CC-BY-NC-4.0`, `public-domain`. Una subida sin licencia válida se rechaza con `Invalid`. |
 
 La lista se puede ampliar sin afectar a ninguna otra decisión.
 
@@ -167,6 +167,36 @@ Si en el futuro hiciera falta editar metadatos, esta decisión dejaría de ser c
 
 ---
 
+## Cómo se busca una pista
+
+### El problema
+
+Buscar es filtrar los manifiestos de cada almacén y unir las respuestas (ver «Dónde viven los metadatos de cada pista»). Falta fijar qué significa que una pista «coincide» con una consulta y en qué orden se devuelven los resultados. Como cada almacén filtra los suyos y el cliente une las respuestas, la regla tiene que dar lo mismo se aplique donde se aplique, y el resultado tiene que ser el mismo sea cual sea el orden en que respondan los almacenes.
+
+### Posibles soluciones
+
+**Coincidencia exacta por campo** (`artist = "Ana"`). Simple y sin ambigüedad, pero obliga a escribir el nombre exacto, con sus mayúsculas y tildes.
+
+**El texto de la consulta aparece dentro del título o del artista.** Más cómodo, pero «ana mar» no encuentra «Mar de Ana».
+
+**Cada palabra de la consulta aparece dentro del título o del artista, sin distinguir mayúsculas ni tildes.** Encuentra la pista aunque las palabras estén en otro orden o en otro campo, y sigue siendo una función pura, igual en todos los almacenes.
+
+**Índice de texto completo con relevancia.** Ordena por parecido, pero cada almacén puntuaría con sus propias estadísticas, así que unir respuestas de varios almacenes daría órdenes distintos según cuáles respondan. Es mucha maquinaria para un catálogo pequeño.
+
+### Decisión
+
+**Cada palabra de la consulta debe aparecer dentro de `title` o de `artist`, sin distinguir mayúsculas ni tildes. La consulta vacía coincide con todo. Los resultados se ordenan por `artist`, luego `title`, luego identificador.**
+
+- La regla es la función pura `matches(metadata, query)` que ya prevé «Qué interfaz se ofrece».
+- El orden lo aplica el cliente después de unir y quitar repetidos. Con un orden total, el mismo conjunto de pistas se devuelve siempre igual, respondan los almacenes en el orden que respondan.
+- Una consulta de más de 200 caracteres se rechaza con `Invalid`.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | El resultado no depende del orden en que respondan los almacenes. |
+
+---
+
 ## Cuándo se considera completa una subida
 
 ### El problema
@@ -234,6 +264,58 @@ La exigencia de licencia adecuada implica poder retirar una pista publicada sin 
 
 ---
 
+## Qué pasa al volver a subir una pista retirada
+
+### El problema
+
+El identificador de una pista es el hash de su manifiesto. Si alguien vuelve a subir exactamente el mismo audio con los mismos metadatos que una pista retirada, obtiene el mismo identificador, y ese identificador ya tiene lápida. Hay que decidir qué responde la subida.
+
+### Posibles soluciones
+
+**Aceptar la subida en silencio.** Se escriben objetos que ya existen y se responde con el identificador. La pista sigue retirada, porque la lápida no se borra, pero quien sube cree que su pista es visible.
+
+**Reactivar la pista.** La subida anula la lápida. Rompe la regla de que una retirada es definitiva y monótona, y con ello vuelve a exigir orden entre réplicas (ver «Cómo se retira una pista»).
+
+**Rechazar la subida con `Conflict`.** Antes de confirmar, la subida comprueba si existe lápida para ese identificador. Quien sube sabe que su pista no será visible y por qué.
+
+### Decisión
+
+**Rechazar con `Conflict`.**
+
+1. Antes de escribir el manifiesto, la subida busca una lápida para el identificador, con la misma regla que la búsqueda: consulta a todos los almacenes con plazo.
+2. Si la encuentra, responde `Conflict` y no escribe el manifiesto. Los segmentos que ya escribió quedan sin uso y los recoge la limpieza (ver «Qué se hace con los objetos que nadie usa»).
+3. Si no responden N o más almacenes, no puede afirmar que no haya lápida y responde `Unavailable`.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con como mucho 2 almacenes caídos, una subida nunca confirma una pista retirada. |
+
+---
+
+## Quién puede retirar una pista
+
+### El problema
+
+Retirar es definitivo. Si cualquiera puede hacerlo, cualquiera puede borrar del catálogo la pista de otro.
+
+### Posibles soluciones
+
+**Cualquiera.** No hay nada que construir, pero no protege contra el abuso.
+
+**Solo quien la subió.** Exige identificar a quien sube y guardar esa identidad con la pista, por ejemplo con una clave pública dentro del manifiesto y una firma en la lápida.
+
+**Solo un administrador.** Exige credenciales y decidir dónde viven y cómo se comprueban en cada almacén.
+
+### Decisión
+
+**En la Fase 1, cualquiera.** La autenticación y los permisos forman parte del modelo de seguridad de la Fase 2. La opción «solo quien la subió» encaja con los objetos inmutables: la clave pública iría en el manifiesto y la firma en la lápida, sin estado que cambie.
+
+| Tipo | Declaración |
+|---|---|
+| Límite | Cualquiera que use el sistema puede retirar cualquier pista. |
+
+---
+
 ## Cómo se divide el audio en fragmentos
 
 ### El problema
@@ -282,6 +364,33 @@ Por qué este formato:
 |---|---|
 | Corrección | Todo segmento de audio confirmado se puede decodificar junto con el segmento inicial de su pista. |
 | Supuesto | Lo que se reproduce es la versión recodificada, no el archivo subido byte a byte. El original se conserva aparte. |
+
+---
+
+## Cómo se garantiza que repetir una subida produzca lo mismo
+
+### El problema
+
+Repetir una subida con resultado incierto es seguro porque produce los mismos identificadores (ver «Cuándo se considera completa una subida»). Pero los segmentos no son el archivo subido: son el resultado de recodificarlo. Si recodificar dos veces el mismo archivo diera bytes distintos, repetir la subida crearía segmentos nuevos, un manifiesto nuevo y otra pista con otro identificador.
+
+### Posibles soluciones
+
+**Confiar en que la recodificación es determinista y comprobarlo.** No cambia nada del diseño, pero depende del comportamiento de `ffmpeg` y de su codificador.
+
+**Identificar la pista por el hash del original y los metadatos, no del manifiesto.** El identificador no dependería de la recodificación, pero dos intentos podrían dejar dos juegos de segmentos distintos para la misma pista, y habría que decidir cuál es el bueno.
+
+**Recodificar una sola vez y reutilizar el resultado.** El cliente guarda localmente los segmentos del primer intento y los reutiliza al repetir. No protege si el cliente que repite es otro o perdió su copia local.
+
+### Decisión
+
+**Recodificación determinista, comprobada y con la versión de `ffmpeg` fijada.**
+
+- Se comprobó codificando dos veces el mismo audio con `ffmpeg` 6.1.1 (Opus a 128 kbit/s, segmentos fMP4 de 2 s): el segmento inicial, los 7 segmentos y la lista de reproducción coinciden byte a byte.
+- Otra versión de `ffmpeg` o del codificador Opus puede producir otros bytes. La versión forma parte de la configuración y se registra al arrancar (principio P6).
+
+| Tipo | Declaración |
+|---|---|
+| Supuesto | Todos los clientes usan la misma versión de `ffmpeg`. Con versiones distintas, la misma subida puede producir pistas distintas, aunque nunca una pista incorrecta. |
 
 ---
 
@@ -649,7 +758,7 @@ Biblioteca del cliente:
 
 | Operación | Devuelve | Errores |
 |---|---|---|
-| `upload(file, metadata)` | Identificador de la pista | `Invalid`; `Unavailable`, con resultado incierto |
+| `upload(file, metadata)` | Identificador de la pista | `Invalid`; `Conflict` si la pista está retirada; `Unavailable`, con resultado incierto |
 | `search(query)` | Pistas encontradas, si el resultado es completo y qué almacenes no respondieron | — |
 | `list()` | Igual que `search` | — |
 | `play(track_id)` | Una sesión de reproducción, con sus métricas de cortes | `NotFound`, `Unavailable` |
@@ -660,6 +769,88 @@ Biblioteca del cliente:
 Interfaz interna de cada almacén: `put(id, data)`, `get(id)`, `inventory()`, `search(query)` y `ping()`.
 
 La validación de metadatos y la función de búsqueda `matches(metadata, query)` son funciones puras. Cada almacén ejecuta `matches` sobre sus manifiestos, y ambas se desarrollan sin depender de cómo se guardan ni se replican los objetos.
+
+---
+
+## Cuándo se responde «no existe» y cuándo «no disponible»
+
+### El problema
+
+Reproducir y retirar empiezan buscando el manifiesto de una pista. Si ningún almacén de los que respondieron lo tiene, puede ser que la pista no exista o que sus réplicas estén justo en los almacenes que no respondieron. `NotFound` le dice a quien llama que no vuelva a intentarlo, y `Unavailable` que lo intente más tarde (principio P5). Confundirlos tiene coste en los dos sentidos.
+
+### Posibles soluciones
+
+**`NotFound` si no lo tiene ninguno de los que respondieron.** Con almacenes caídos, afirmaría que no existe una pista que sí existe.
+
+**`Unavailable` si falta cualquier almacén.** Nunca se equivoca, pero con un solo almacén caído no se podría afirmar nunca que algo no existe.
+
+**`NotFound` solo si no respondieron menos de N almacenes.** Todo manifiesto confirmado tiene N réplicas. Si faltan menos de N almacenes, alguna réplica estaba entre los que respondieron, así que la ausencia es real. Es la misma regla que decide si una búsqueda está completa (ver «Qué interfaz se ofrece»).
+
+### Decisión
+
+**`NotFound` solo si no respondieron menos de N almacenes. En otro caso, `Unavailable`.** Una pista retirada también da `NotFound`, indicando el motivo.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con como mucho 2 almacenes caídos, nunca se responde `NotFound` para una pista confirmada y no retirada. |
+
+---
+
+## Cómo se usa el sistema desde fuera
+
+### El problema
+
+La biblioteca del cliente es la interfaz para otro programa. Para usar el sistema a mano y, sobre todo, para lanzar los experimentos desde guiones, hace falta una forma de invocar cada operación y de saber cómo terminó sin leer texto.
+
+### Posibles soluciones
+
+**Solo la biblioteca.** Cada experimento sería un programa propio.
+
+**Una interfaz web.** Cómoda para una persona, pero difícil de automatizar y mucho código que no aporta nada a lo distribuido.
+
+**Una línea de comandos, con códigos de salida por clase de error y salida en JSON.** Cualquier guion la lanza, distingue los resultados por el código de salida y procesa la salida.
+
+### Decisión
+
+**Una línea de comandos, `dtn`, con una orden por operación.**
+
+| Orden | Resultado |
+|---|---|
+| `dtn upload FILE --title T --artist A --license L` | Imprime el identificador de la pista. |
+| `dtn search TEXTO`, `dtn list` | Una línea por pista e indicación de si el resultado es completo. |
+| `dtn play TRACK_ID [--headless]` | Los eventos de la sesión, uno por línea, y un resumen al final. |
+| `dtn withdraw TRACK_ID --reason MOTIVO` | Nada si tiene éxito. |
+
+Códigos de salida: 0 éxito (en las búsquedas, también si el resultado es incompleto, que se indica en la salida); 2 `Invalid`; 3 `NotFound`; 4 `Unavailable`; 5 `Conflict`. Toda orden admite `--json`.
+
+**Eventos de una reproducción:** `started` (con el tiempo hasta empezar a sonar), `source_switch` (almacén abandonado, almacén nuevo y motivo), `stall_start` y `stall_end` (un corte y su duración), `finished` y `failed`. El resumen final da el número de cortes, su duración total, el número de cambios de fuente y los segmentos obtenidos de cada almacén. Son los datos que necesitan los experimentos.
+
+---
+
+## Cuánto puede durar una operación
+
+### El problema
+
+Una operación que nunca termina no es «lenta»: es un fallo que no se ve. Además, la limpieza de objetos sin uso supone que toda subida termina antes de `DTN_GC_GRACE_SECONDS` (ver «Qué se hace con los objetos que nadie usa»), y eso solo se puede asegurar si las subidas tienen un tamaño y una duración acotados.
+
+### Posibles soluciones
+
+**Sin plazo total.** Solo cuentan los plazos de cada petición a un almacén, pero una operación con muchos reintentos puede durar sin límite.
+
+**Un plazo total por operación, configurable, y un tamaño máximo de subida.** Toda operación termina, y el supuesto de la limpieza se puede justificar.
+
+### Decisión
+
+**Plazo total configurable por operación y límites de subida.**
+
+- Al agotarse el plazo total, la operación termina con `Unavailable`, que en las escrituras significa resultado incierto.
+- Una subida admite como mucho `DTN_MAX_UPLOAD_SECONDS` de audio y `DTN_MAX_UPLOAD_BYTES` de archivo. Si los supera, se rechaza con `Invalid`.
+- `title` y `artist` tienen como mucho 200 caracteres.
+
+| Tipo | Declaración |
+|---|---|
+| Objetivo | Toda operación termina en como mucho su plazo total. |
+| Supuesto | `DTN_UPLOAD_TIMEOUT_SECONDS` es mucho menor que `DTN_GC_GRACE_SECONDS`. |
 
 ---
 
@@ -735,6 +926,11 @@ Los objetos de una pista retirada, o de una subida abandonada, ocupan espacio in
 | `DTN_REPAIR_INTERVAL_SECONDS` | 30 | Periodo del agente de reparación. |
 | `DTN_SCRUB_INTERVAL_SECONDS` | 3600 | Periodo de la comprobación de integridad en segundo plano. |
 | `DTN_GC_GRACE_SECONDS` | 86400 | Antigüedad mínima de un objeto sin uso para borrarlo. |
+| `DTN_UPLOAD_TIMEOUT_SECONDS` | 600 | Plazo total de una subida. |
+| `DTN_SEARCH_TIMEOUT_MS` | 2000 | Plazo total de una búsqueda; los almacenes que no responden antes quedan como no respondidos. |
+| `DTN_WITHDRAW_TIMEOUT_SECONDS` | 30 | Plazo total de una retirada. |
+| `DTN_MAX_UPLOAD_SECONDS` | 1200 | Duración máxima del audio de una subida. |
+| `DTN_MAX_UPLOAD_BYTES` | 209715200 | Tamaño máximo del archivo subido (200 MB). |
 
 Los valores por defecto son un punto de partida y se ajustarán con mediciones.
 
