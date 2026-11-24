@@ -36,7 +36,7 @@ Metadatos mínimos de una pista:
 | `title` | Título. |
 | `artist` | Autor o intérprete. |
 | `duration` | Duración en segundos, calculada al subir a partir de los segmentos de audio. |
-| `license` | Licencia, obligatoria y de una lista cerrada. Una subida sin licencia válida se rechaza con `Invalid`. |
+| `license` | Licencia, obligatoria y de una lista cerrada: `CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`, `CC-BY-NC-4.0`, `public-domain`. Una subida sin licencia válida se rechaza con `Invalid`. |
 
 La lista se puede ampliar sin afectar a ninguna otra decisión.
 
@@ -47,6 +47,7 @@ La lista se puede ampliar sin afectar a ninguna otra decisión.
 - **Caídas de proceso con recuperación** (*crash-recovery*): un almacén puede detenerse de golpe y volver más tarde con lo que tenía guardado en disco.
 - **Lentitud:** un almacén vivo puede tardar más de lo esperado en responder.
 - **Corrupción de datos en disco**, que se detecta y se repara.
+- **Almacenes inaccesibles** por un fallo de red o por pérdida de mensajes. Para el cliente, un almacén que no responde es indistinguible de uno caído, así que cuenta como caído: todas las garantías valen contando juntos los caídos y los inaccesibles. Dos clientes que alcanzan almacenes distintos nunca ven datos contradictorios, porque los objetos no cambian.
 
 No se toleran comportamientos maliciosos (fallos bizantinos). Todos los almacenes corren en la misma máquina, así que un fallo de la máquina los afecta a todos a la vez (fallo correlacionado).
 
@@ -167,6 +168,66 @@ Si en el futuro hiciera falta editar metadatos, esta decisión dejaría de ser c
 
 ---
 
+## Cómo se escriben los manifiestos y las lápidas
+
+### El problema
+
+El identificador de una pista es el hash de su manifiesto, y el de una lápida, el hash de su contenido. Si dos clientes escriben el mismo manifiesto con bytes distintos (otro orden de los campos, otros espacios, otra forma de escribir un número), obtienen identificadores distintos para la misma pista, y la repetición segura de una subida deja de funcionar. Además, cada almacén tiene que distinguir manifiestos y lápidas de los segmentos para poder buscar entre ellos.
+
+### Posibles soluciones
+
+**JSON sin más reglas.** Fácil de leer y de escribir, pero el mismo contenido admite muchas escrituras distintas.
+
+**Un formato binario propio.** Una sola forma de escribir cada contenido, pero hay que programar y documentar el formato, y deja de poder leerse a simple vista.
+
+**JSON canónico:** claves ordenadas, sin espacios, en UTF-8, con números enteros o decimales escritos siempre igual. Se lee a simple vista y el mismo contenido produce siempre los mismos bytes.
+
+### Decisión
+
+**JSON canónico, con un campo `type` que distingue manifiestos y lápidas.**
+
+- Claves en orden alfabético, sin espacios, codificado en UTF-8. Las duraciones se guardan en milisegundos enteros, para no depender de cómo se escriben los decimales.
+- **Manifiesto:** `{"artist", "duration_ms", "init", "license", "original", "segments": [{"duration_ms", "id"}, …], "title", "type": "manifest", "version": 1}`.
+- **Lápida:** `{"original", "reason", "track_id", "type": "tombstone", "version": 1}`, donde `original` es el hash del archivo original de la pista.
+- Al guardar un objeto, el almacén intenta leerlo como JSON con un `type` conocido. Si lo consigue, lo añade a su índice de manifiestos o de lápidas; si no, es un segmento o un original, y lo trata como bytes opacos. Las lápidas se indexan por `track_id` y por `original`.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con una misma implementación, el mismo contenido de un manifiesto o de una lápida produce siempre el mismo identificador, lo escriba el cliente que lo escriba. |
+| Límite | Dos implementaciones distintas pueden escribir el mismo contenido con bytes distintos y obtener identificadores distintos. |
+
+---
+
+## Cómo se busca una pista
+
+### El problema
+
+Buscar es filtrar los manifiestos de cada almacén y unir las respuestas (ver «Dónde viven los metadatos de cada pista»). Falta fijar qué significa que una pista «coincide» con una consulta y en qué orden se devuelven los resultados. Como cada almacén filtra los suyos y el cliente une las respuestas, la regla tiene que dar lo mismo se aplique donde se aplique, y el resultado tiene que ser el mismo sea cual sea el orden en que respondan los almacenes.
+
+### Posibles soluciones
+
+**Coincidencia exacta por campo** (`artist = "Ana"`). Simple y sin ambigüedad, pero obliga a escribir el nombre exacto, con sus mayúsculas y tildes.
+
+**El texto de la consulta aparece dentro del título o del artista.** Más cómodo, pero «ana mar» no encuentra «Mar de Ana».
+
+**Cada palabra de la consulta aparece dentro del título o del artista, sin distinguir mayúsculas ni tildes.** Encuentra la pista aunque las palabras estén en otro orden o en otro campo, y sigue siendo una función pura, igual en todos los almacenes.
+
+**Índice de texto completo con relevancia.** Ordena por parecido, pero cada almacén puntuaría con sus propias estadísticas, así que unir respuestas de varios almacenes daría órdenes distintos según cuáles respondan. Es mucha maquinaria para un catálogo pequeño.
+
+### Decisión
+
+**Cada palabra de la consulta debe aparecer dentro de `title` o de `artist`, sin distinguir mayúsculas ni tildes. La consulta vacía coincide con todo. Los resultados se ordenan por `artist`, luego `title`, luego identificador.**
+
+- La regla es la función pura `matches(metadata, query)` que ya prevé «Qué interfaz se ofrece».
+- El orden lo aplica el cliente después de unir y quitar repetidos. Con un orden total, el mismo conjunto de pistas se devuelve siempre igual, respondan los almacenes en el orden que respondan.
+- Una consulta de más de 200 caracteres se rechaza con `Invalid`.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | El resultado no depende del orden en que respondan los almacenes. |
+
+---
+
 ## Cuándo se considera completa una subida
 
 ### El problema
@@ -191,8 +252,8 @@ Además, cuando una escritura remota no responde, el cliente no sabe qué ocurri
 
 1. Primero se escriben, con todas sus réplicas, los segmentos de audio, el segmento inicial y el original.
 2. Solo entonces se escribe el manifiesto, con todas sus réplicas.
-3. La subida se confirma cuando el manifiesto tiene todas sus réplicas.
-4. Si la escritura del manifiesto falla a mitad, algún almacén puede tenerlo ya y la pista aparecer en las búsquedas aunque quien sube haya recibido un error. Por eso un error en la subida significa **resultado incierto**, no «no ocurrió».
+3. Se distinguen dos momentos. La pista es **visible** desde que un almacén guarda su manifiesto, y **confirmada** cuando el manifiesto tiene todas sus réplicas. La subida responde con el identificador solo al confirmar.
+4. Si la escritura del manifiesto falla a mitad, algún almacén puede tenerlo ya y la pista aparecer en las búsquedas aunque quien sube haya recibido un error. Por eso un error en la subida significa **resultado incierto**, no «no ocurrió». Impedir que una pista sea visible antes de confirmarse exigiría un commit atómico o un punto único que decida qué es visible: cualquier marca de confirmación escrita en varios almacenes puede quedarse a medias igual que el manifiesto.
 5. El identificador de cada objeto, y por tanto de la pista, es el hash de su contenido. Funciona como clave de idempotencia: repetir una subida con resultado incierto no crea duplicados y completa las réplicas que falten. La reparación de réplicas también las completa.
 
 El commit atómico en dos fases se descarta: puede bloquear y añadiría un coordinador, cuando la repetición idempotente llega al mismo resultado final sin coordinación. Ningún invariante de esta operación cruza fronteras de autoridad que obliguen a una transacción distribuida.
@@ -200,6 +261,7 @@ El commit atómico en dos fases se descarta: puede bloquear y añadiría un coor
 | Tipo | Declaración |
 |---|---|
 | Corrección | Toda pista visible tiene todos sus fragmentos guardados con todas sus réplicas. |
+| Límite | Una pista puede ser visible sin estar confirmada: mientras se escribe su manifiesto, o tras una subida fallida, hasta que se repite o la reparación completa las réplicas del manifiesto. |
 | Semántica | Un error al subir significa resultado incierto: la pista puede haber quedado visible. Repetir la subida es seguro y la completa. |
 
 ---
@@ -222,15 +284,101 @@ La exigencia de licencia adecuada implica poder retirar una pista publicada sin 
 
 **Retirada con lápidas.**
 
-1. La lápida es un objeto inmutable, identificado por su hash y replicado como los demás.
-2. Se coloca con la misma clave que el manifiesto de la pista, para quedar en los mismos almacenes.
-3. La búsqueda devuelve también las lápidas, y el cliente descarta las pistas retiradas.
-4. Antes de empezar a reproducir, el cliente comprueba que no haya lápida. Una reproducción ya empezada termina normalmente.
+1. La lápida es un objeto inmutable, identificado por su hash. Lleva el identificador de la pista y el hash de su archivo original.
+2. **Se retira la grabación, no solo la pista.** El problema de una licencia es del audio, no del título: la lápida retira también cualquier otra pista con el mismo archivo original, ya subida o que se suba después.
+3. **Se replica en todos los almacenes, no solo en N.** El cliente la escribe en todos los que responden y confirma cuando la tienen N; la reparación la copia después a los que faltan. Una lápida ocupa unos cientos de bytes, y así, pasada la reparación, cualquier almacén vivo conoce la retirada, aunque haya más de 2 caídos.
+4. La búsqueda devuelve también las lápidas, y el cliente descarta las pistas retiradas y las que tienen el mismo original.
+5. Antes de empezar a reproducir, el cliente comprueba que no haya lápida (ver «Cómo encuentra el cliente la lápida de una pista»). Una reproducción ya empezada termina normalmente.
+6. Antes de escribir una lápida, el cliente comprueba si ya hay alguna para la pista o su original. Si la hay, no escribe otra: retirar una pista ya retirada no cambia nada, aunque el motivo sea distinto.
 
 | Tipo | Declaración |
 |---|---|
-| Corrección | Con como mucho 2 almacenes caídos, una pista cuya retirada se confirmó no aparece en ninguna búsqueda posterior. |
+| Corrección | Con como mucho 2 almacenes caídos, una pista cuya retirada se confirmó no aparece en ninguna búsqueda completa posterior, y tampoco ninguna otra con el mismo archivo original. |
+| Objetivo | Tras la reparación, cada lápida está en todos los almacenes, y basta con que responda uno para ver la retirada. |
+| Límite | El original se reconoce por su hash: recodificar o modificar el archivo esquiva la retirada. |
 | Supuesto | Una retirada no se deshace. Deshacerla sería un cambio no monótono y volvería a exigir orden entre réplicas. |
+
+---
+
+## Qué pasa al volver a subir una pista retirada
+
+### El problema
+
+El identificador de una pista es el hash de su manifiesto. Si alguien vuelve a subir exactamente el mismo audio con los mismos metadatos que una pista retirada, obtiene el mismo identificador, y ese identificador ya tiene lápida. Si cambia los metadatos, obtiene otro identificador, pero el archivo original es el mismo, y la retirada es de la grabación (ver «Cómo se retira una pista»). Hay que decidir qué responde la subida y cuándo lo comprueba.
+
+### Posibles soluciones
+
+**Aceptar la subida en silencio.** Se escriben objetos que ya existen y se responde con el identificador. La pista sigue retirada, porque la lápida no se borra, pero quien sube cree que su pista es visible.
+
+**Reactivar la pista.** La subida anula la lápida. Rompe la regla de que una retirada es definitiva y monótona, y con ello vuelve a exigir orden entre réplicas (ver «Cómo se retira una pista»).
+
+**Rechazar la subida con `Conflict`.** La subida comprueba si existe lápida para ese identificador o ese original. Quien sube sabe que su pista no será visible y por qué.
+
+### Decisión
+
+**Rechazar con `Conflict`.**
+
+1. **Antes de escribir nada**, la subida busca lápidas del identificador o del archivo original, con `tombstones(track_id, original)` enviada a todos los almacenes con plazo. Es posible porque el manifiesto, y por tanto el identificador, se construye en cuanto termina la recodificación: solo contiene hashes y metadatos.
+2. Si encuentra alguna, responde `Conflict` sin haber escrito nada. Comprobarlo al final dejaría hasta 200 MB por réplica como basura hasta que pasara la limpieza.
+3. Si no responden N o más almacenes, no puede afirmar que no haya lápida y responde `Unavailable`, también sin escribir nada.
+4. Una retirada que llegue mientras la subida escribe no se pierde: su lápida retira la pista igualmente cuando se confirma.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con como mucho 2 almacenes caídos, una subida nunca confirma una pista cuya retirada, o la de otra con el mismo original, se confirmó antes de empezar la subida. |
+
+---
+
+## Quién puede retirar una pista
+
+### El problema
+
+Retirar es definitivo. Si cualquiera puede hacerlo, cualquiera puede borrar del catálogo la pista de otro.
+
+### Posibles soluciones
+
+**Cualquiera.** No hay nada que construir, pero no protege contra el abuso.
+
+**Solo quien la subió.** Exige identificar a quien sube y guardar esa identidad con la pista, por ejemplo con una clave pública dentro del manifiesto y una firma en la lápida.
+
+**Solo un administrador.** Exige credenciales y decidir dónde viven y cómo se comprueban en cada almacén.
+
+### Decisión
+
+**En la Fase 1, cualquiera.** La autenticación y los permisos forman parte del modelo de seguridad de la Fase 2. La opción «solo quien la subió» encaja con los objetos inmutables: la clave pública iría en el manifiesto y la firma en la lápida, sin estado que cambie.
+
+| Tipo | Declaración |
+|---|---|
+| Límite | Cualquiera que use el sistema puede retirar cualquier pista. |
+
+---
+
+## Cómo encuentra el cliente la lápida de una pista
+
+### El problema
+
+Antes de reproducir, antes de empezar a escribir una subida y antes de retirar, el cliente tiene que saber si una pista, o su archivo original, está retirada. Pero el identificador de la lápida es el hash de su contenido, que incluye el motivo, así que el cliente no lo conoce: solo conoce el identificador de la pista.
+
+### Posibles soluciones
+
+**Buscar en todo el catálogo y filtrar.** Reutiliza `search`, pero trae todos los manifiestos de todos los almacenes para responder una pregunta sobre una sola pista.
+
+**Calcular el identificador de la lápida.** Solo es posible si la lápida no lleva motivo ni ningún otro dato variable, y entonces se pierde el motivo de la retirada.
+
+**Una consulta por identificador de pista.** Cada almacén indexa sus lápidas por el `track_id` y el `original` que contienen (ver «Cómo se escriben los manifiestos y las lápidas») y responde si tiene alguna para esa pista o ese original. El cliente pregunta a todos los almacenes a la vez, con plazo.
+
+### Decisión
+
+**Una consulta por identificador de pista y por archivo original, `tombstones(track_id, original)`, enviada a todos los almacenes.**
+
+- Basta con que un almacén responda con una lápida válida (su hash coincide y su `track_id` o su `original` es el pedido) para que la pista esté retirada.
+- Si ninguno la tiene, la pista solo se considera no retirada si no respondieron menos de N almacenes, con la misma regla que en «Cuándo se responde «no existe» y cuándo «no disponible»».
+- Si respondieron menos, la comprobación no es concluyente. `upload` responde `Unavailable` sin escribir nada. `play`, en cambio, empieza a reproducir y lo indica en la sesión: es el mismo riesgo que ya acepta una búsqueda con `complete = false`, y el requisito de seguir sirviendo mientras quede una fuente válida pesa más. Como las lápidas acaban en todos los almacenes (ver «Cómo se retira una pista»), solo suena una pista retirada si la retirada es tan reciente que la reparación aún no la ha copiado y, además, faltan N almacenes o más.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con como mucho 2 almacenes caídos, el cliente nunca toma por vigente una pista cuya retirada se confirmó. |
+| Límite | Con 3 o más almacenes caídos, `play` puede reproducir una pista retirada, y lo indica. |
 
 ---
 
@@ -285,6 +433,33 @@ Por qué este formato:
 
 ---
 
+## Cómo se garantiza que repetir una subida produzca lo mismo
+
+### El problema
+
+Repetir una subida con resultado incierto es seguro porque produce los mismos identificadores (ver «Cuándo se considera completa una subida»). Pero los segmentos no son el archivo subido: son el resultado de recodificarlo. Si recodificar dos veces el mismo archivo diera bytes distintos, repetir la subida crearía segmentos nuevos, un manifiesto nuevo y otra pista con otro identificador.
+
+### Posibles soluciones
+
+**Confiar en que la recodificación es determinista y comprobarlo.** No cambia nada del diseño, pero depende del comportamiento de `ffmpeg` y de su codificador.
+
+**Identificar la pista por el hash del original y los metadatos, no del manifiesto.** El identificador no dependería de la recodificación, pero dos intentos podrían dejar dos juegos de segmentos distintos para la misma pista, y habría que decidir cuál es el bueno.
+
+**Recodificar una sola vez y reutilizar el resultado.** El cliente guarda localmente los segmentos del primer intento y los reutiliza al repetir. No protege si el cliente que repite es otro o perdió su copia local.
+
+### Decisión
+
+**Recodificación determinista, comprobada y con la versión de `ffmpeg` fijada.**
+
+- Se comprobó codificando dos veces el mismo audio con `ffmpeg` 6.1.1 (Opus a 128 kbit/s, segmentos fMP4 de 2 s): el segmento inicial, los 7 segmentos y la lista de reproducción coinciden byte a byte.
+- Otra versión de `ffmpeg` o del codificador Opus puede producir otros bytes. La versión forma parte de la configuración y se registra al arrancar (principio P6).
+
+| Tipo | Declaración |
+|---|---|
+| Supuesto | Todos los clientes usan la misma implementación y la misma versión de `ffmpeg`. Con versiones o implementaciones distintas, la misma subida puede producir pistas distintas, aunque nunca una pista incorrecta. |
+
+---
+
 ## En qué almacenes se coloca cada réplica
 
 ### El problema
@@ -310,10 +485,10 @@ Cada objeto debe quedar en N de los S almacenes. Hay que responder a tres pregun
 **Rendezvous hashing.**
 
 1. La puntuación de cada almacén para un objeto es el SHA-256 de su nombre lógico concatenado con el identificador del objeto. Los almacenes se ordenan de mayor a menor puntuación. Como se usa el nombre lógico, el orden no cambia si un almacén se reinicia.
-2. **Escritura:** se intenta en ese orden, con plazo, hasta tener N réplicas confirmadas. Un almacén que falla se salta.
+2. **Escritura:** se intenta en ese orden, con plazo, hasta tener N réplicas confirmadas. Un almacén caído o sospechoso se salta; uno saturado se reintenta (ver «Qué hace un almacén cuando está al máximo de peticiones»).
 3. **Lectura:** se sigue el mismo orden (ver «De qué réplica se lee»). Si fallan los primeros, se sigue bajando, y así se encuentran también las réplicas escritas tras un salto.
 4. **Reposición:** la réplica que falte se crea en el primer almacén vivo del orden que no la tenga.
-5. Los manifiestos, segmentos iniciales y originales usan su propio identificador. Las lápidas usan el de la pista que retiran.
+5. Los manifiestos, segmentos iniciales y originales usan su propio identificador. Las lápidas no siguen este orden: van a todos los almacenes (ver «Cómo se retira una pista»).
 
 Frente al hashing consistente, ofrece las mismas propiedades ante cambios en el conjunto de almacenes y un reparto uniforme con pocos almacenes sin necesidad de nodos virtuales. Su coste, un hash por almacén y objeto, es irrelevante con 5 almacenes. Si el número de almacenes llegara a cientos, convendría pasar a un anillo con nodos virtuales, cuyas búsquedas son logarítmicas.
 
@@ -566,7 +741,7 @@ Tras una caída, los objetos de ese almacén quedan con menos réplicas de las d
 
 1. Cada `DTN_REPAIR_INTERVAL_SECONDS`, y también cuando detecta que un almacén cayó o volvió, el agente de reparación pide su inventario a cada almacén vivo.
 2. Para cada objeto calcula el orden de colocación.
-3. Si tiene menos de N réplicas, lo copia desde una réplica sana, comprobando su hash, en el primer almacén vivo del orden que no lo tenga.
+3. Si tiene menos de N réplicas, lo copia desde una réplica sana, comprobando su hash, en el primer almacén vivo del orden que no lo tenga. Las lápidas son la excepción: se copian a todos los almacenes vivos que no las tengan (ver «Cómo se retira una pista»).
 4. Escribir un objeto inmutable es idempotente, así que pueden trabajar varios agentes a la vez, o un agente y una subida, sin coordinarse.
 
 El agente no está en el camino de las lecturas: si cae, el servicio sigue y solo se retrasa la reparación. Se reinicia igual que los almacenes.
@@ -629,6 +804,33 @@ Un almacén sigue siendo un programa concurrente normal. Si atiende una petició
 
 ---
 
+## Qué hace un almacén cuando está al máximo de peticiones
+
+### El problema
+
+Un almacén atiende como mucho `DTN_STORE_CONCURRENCY` peticiones a la vez. Hay que decidir qué pasa con la siguiente.
+
+### Posibles soluciones
+
+**Ponerla en cola.** No se rechaza nada, pero la cola puede crecer sin límite, y el cliente no distingue un almacén saturado de uno lento: espera hasta que vence su plazo.
+
+**Cola acotada, y rechazar cuando se llena.** Absorbe ráfagas cortas, pero añade un parámetro más y sigue haciendo esperar.
+
+**Rechazar en el acto con `Unavailable`.** El cliente se entera enseguida y pide a otra réplica, que es lo que ya hace ante cualquier fallo. La carga se reparte sola entre réplicas.
+
+### Decisión
+
+**Rechazar en el acto con `Unavailable`, indicando que el motivo es saturación.** Un rechazo por saturación no cuenta como fallo para el detector: el almacén está vivo y responde rápido. Qué hace el cliente depende de la operación:
+
+- **Al leer**, pide a otra réplica y, si reintenta en el mismo almacén, lo hace con espera exponencial (ver «Qué hace el reproductor cuando una lectura falla»).
+- **Al escribir**, reintenta el mismo almacén con espera exponencial, y solo pasa al siguiente del orden si el almacén está caído o es sospechoso. Si escribiera en otro, la réplica quedaría fuera de su sitio: cada lectura posterior preguntaría primero a un almacén que no la tiene, y la reparación no lo corregiría, porque el objeto ya tiene N réplicas.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Un almacén nunca tiene más de `DTN_STORE_CONCURRENCY` peticiones en curso. |
+
+---
+
 ## Qué interfaz se ofrece
 
 ### El problema
@@ -649,7 +851,7 @@ Biblioteca del cliente:
 
 | Operación | Devuelve | Errores |
 |---|---|---|
-| `upload(file, metadata)` | Identificador de la pista | `Invalid`; `Unavailable`, con resultado incierto |
+| `upload(file, metadata)` | Identificador de la pista | `Invalid`; `Conflict` si la pista está retirada; `Unavailable`, con resultado incierto |
 | `search(query)` | Pistas encontradas, si el resultado es completo y qué almacenes no respondieron | — |
 | `list()` | Igual que `search` | — |
 | `play(track_id)` | Una sesión de reproducción, con sus métricas de cortes | `NotFound`, `Unavailable` |
@@ -657,9 +859,91 @@ Biblioteca del cliente:
 
 **Resultado completo:** una búsqueda es completa si los almacenes que no respondieron son menos de N. Así, cada manifiesto tiene al menos una réplica entre los que sí respondieron, y el cliente puede afirmarlo sin consultar nada más. El comportamiento con almacenes inaccesibles queda así expresado en la propia interfaz.
 
-Interfaz interna de cada almacén: `put(id, data)`, `get(id)`, `inventory()`, `search(query)` y `ping()`.
+Interfaz interna de cada almacén: `put(id, data)`, `get(id)`, `inventory()`, `search(query)`, `tombstones(track_id, original)`, `delete_if_older(id, seconds)` y `ping()`. Las dos penúltimas salen de «Cómo encuentra el cliente la lápida de una pista» y «Cómo borra un almacén un objeto sin uso». La especificación de cada una está en [`contract.md`](contract.md).
 
 La validación de metadatos y la función de búsqueda `matches(metadata, query)` son funciones puras. Cada almacén ejecuta `matches` sobre sus manifiestos, y ambas se desarrollan sin depender de cómo se guardan ni se replican los objetos.
+
+---
+
+## Cuándo se responde «no existe» y cuándo «no disponible»
+
+### El problema
+
+Reproducir y retirar empiezan buscando el manifiesto de una pista. Si ningún almacén de los que respondieron lo tiene, puede ser que la pista no exista o que sus réplicas estén justo en los almacenes que no respondieron. `NotFound` le dice a quien llama que no vuelva a intentarlo, y `Unavailable` que lo intente más tarde (principio P5). Confundirlos tiene coste en los dos sentidos.
+
+### Posibles soluciones
+
+**`NotFound` si no lo tiene ninguno de los que respondieron.** Con almacenes caídos, afirmaría que no existe una pista que sí existe.
+
+**`Unavailable` si falta cualquier almacén.** Nunca se equivoca, pero con un solo almacén caído no se podría afirmar nunca que algo no existe.
+
+**`NotFound` solo si no respondieron menos de N almacenes.** Todo manifiesto confirmado tiene N réplicas. Si faltan menos de N almacenes, alguna réplica estaba entre los que respondieron, así que la ausencia es real. Es la misma regla que decide si una búsqueda está completa (ver «Qué interfaz se ofrece»).
+
+### Decisión
+
+**`NotFound` solo si no respondieron menos de N almacenes. En otro caso, `Unavailable`.** Una pista retirada también da `NotFound`, indicando el motivo.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Con como mucho 2 almacenes caídos, nunca se responde `NotFound` para una pista confirmada y no retirada. |
+
+---
+
+## Cómo se usa el sistema desde fuera
+
+### El problema
+
+La biblioteca del cliente es la interfaz para otro programa. Para usar el sistema a mano y, sobre todo, para lanzar los experimentos desde guiones, hace falta una forma de invocar cada operación y de saber cómo terminó sin leer texto.
+
+### Posibles soluciones
+
+**Solo la biblioteca.** Cada experimento sería un programa propio.
+
+**Una interfaz web.** Cómoda para una persona, pero difícil de automatizar y mucho código que no aporta nada a lo distribuido.
+
+**Una línea de comandos, con códigos de salida por clase de error y salida en JSON.** Cualquier guion la lanza, distingue los resultados por el código de salida y procesa la salida.
+
+### Decisión
+
+**Una línea de comandos, `dtn`, con una orden por operación.**
+
+| Orden | Resultado |
+|---|---|
+| `dtn upload FILE --title T --artist A --license L` | Imprime el identificador de la pista. |
+| `dtn search TEXTO`, `dtn list` | Una línea por pista e indicación de si el resultado es completo. |
+| `dtn play TRACK_ID [--headless]` | Los eventos de la sesión, uno por línea, y un resumen al final. |
+| `dtn withdraw TRACK_ID --reason MOTIVO` | Nada si tiene éxito. |
+
+Códigos de salida: 0 éxito (en las búsquedas, también si el resultado es incompleto, que se indica en la salida); 2 `Invalid`; 3 `NotFound`; 4 `Unavailable`; 5 `Conflict`. Toda orden admite `--json`.
+
+**Eventos de una reproducción:** `started` (con el tiempo hasta empezar a sonar), `source_switch` (almacén abandonado, almacén nuevo y motivo), `stall_start` y `stall_end` (un corte y su duración), `finished` y `failed`. El resumen final da el número de cortes, su duración total, el número de cambios de fuente y los segmentos obtenidos de cada almacén. Son los datos que necesitan los experimentos.
+
+---
+
+## Cuánto puede durar una operación
+
+### El problema
+
+Una operación que nunca termina no es «lenta»: es un fallo que no se ve. Además, la limpieza de objetos sin uso supone que toda subida termina antes de `DTN_GC_GRACE_SECONDS` (ver «Qué se hace con los objetos que nadie usa»), y eso solo se puede asegurar si las subidas tienen un tamaño y una duración acotados.
+
+### Posibles soluciones
+
+**Sin plazo total.** Solo cuentan los plazos de cada petición a un almacén, pero una operación con muchos reintentos puede durar sin límite.
+
+**Un plazo total por operación, configurable, y un tamaño máximo de subida.** Toda operación termina, y el supuesto de la limpieza se puede justificar.
+
+### Decisión
+
+**Plazo total configurable por operación y límites de subida.**
+
+- Al agotarse el plazo total, la operación termina con `Unavailable`, que en las escrituras significa resultado incierto.
+- Una subida admite como mucho `DTN_MAX_UPLOAD_SECONDS` de audio y `DTN_MAX_UPLOAD_BYTES` de archivo. Si los supera, se rechaza con `Invalid`.
+- `title` y `artist` tienen como mucho 200 caracteres.
+
+| Tipo | Declaración |
+|---|---|
+| Objetivo | Toda operación termina en como mucho su plazo total. |
+| Supuesto | `DTN_UPLOAD_TIMEOUT_SECONDS` es mucho menor que `DTN_GC_GRACE_SECONDS`. |
 
 ---
 
@@ -704,14 +988,40 @@ Los objetos de una pista retirada, o de una subida abandonada, ocupan espacio in
 **Marcar y barrer, con periodo de gracia.**
 
 1. El agente de reparación marca todo objeto referenciado por algún manifiesto no retirado: sus segmentos, su segmento inicial y su original.
-2. Borra los objetos no marcados con más de `DTN_GC_GRACE_SECONDS` de antigüedad.
+2. Borra los objetos no marcados con más de `DTN_GC_GRACE_SECONDS` de antigüedad (ver «Cómo borra un almacén un objeto sin uso»).
 3. Escribir un objeto que ya existe renueva su antigüedad. Sin esto, una subida que reutiliza segmentos antiguos sin uso podría perderlos entre su escritura y la del manifiesto.
-4. Los manifiestos y las lápidas de las pistas retiradas se conservan, para que la retirada siga siendo visible.
+4. La antigüedad se cuenta desde la última escritura o desde que arrancó el almacén, lo que sea más reciente, con un reloj monótono. No depende de la hora del sistema, que puede saltar hacia delante al corregirse y hacer que un objeto recién escrito parezca viejo, y no hay que guardarla en disco: tras un reinicio, todo objeto vuelve a empezar con antigüedad 0, que es la dirección segura.
+5. Los manifiestos y las lápidas de las pistas retiradas se conservan, para que la retirada siga siendo visible.
 
 | Tipo | Declaración |
 |---|---|
 | Corrección | Un objeto referenciado por una pista vigente nunca se borra. |
 | Supuesto | Toda subida termina antes de `DTN_GC_GRACE_SECONDS`. |
+| Límite | Un almacén que se reinicia más a menudo que `DTN_GC_GRACE_SECONDS` no borra nada. |
+
+---
+
+## Cómo borra un almacén un objeto sin uso
+
+### El problema
+
+La limpieza decide qué objetos no usa nadie y los borra (ver «Qué se hace con los objetos que nadie usa»). Entre la decisión del agente y el borrado pasa tiempo, y en ese intervalo una subida puede volver a escribir el objeto, renovando su antigüedad, porque lo necesita. Si el borrado no lo tiene en cuenta, borra un objeto que una subida en curso acaba de confirmar.
+
+### Posibles soluciones
+
+**Borrado incondicional, `delete(id)`.** Simple, pero sufre exactamente la carrera descrita.
+
+**Bloquear las subidas durante la limpieza.** Evita la carrera, pero detiene el servicio y exige coordinar a todos los clientes con el agente.
+
+**Borrado condicional, `delete_if_older(id, seconds)`.** El almacén borra el objeto solo si, en el momento de borrar, su antigüedad supera `seconds`. La comprobación y el borrado se hacen bajo el cerrojo del índice, así que ninguna escritura del mismo objeto puede colarse entre ambos. La antigüedad la mide el propio almacén con su reloj monótono, así que no hay que comparar relojes de procesos distintos ni depender de la hora del sistema.
+
+### Decisión
+
+**Borrado condicional, `delete_if_older(id, seconds)`, con `seconds = DTN_GC_GRACE_SECONDS`.** Si el objeto fue reescrito después de que el agente decidiera borrarlo, el almacén no lo borra y responde que se conservó.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | Un objeto escrito hace menos de `DTN_GC_GRACE_SECONDS` nunca se borra, aunque el almacén se reinicie entre medias o cambie la hora del sistema. |
 
 ---
 
@@ -735,6 +1045,11 @@ Los objetos de una pista retirada, o de una subida abandonada, ocupan espacio in
 | `DTN_REPAIR_INTERVAL_SECONDS` | 30 | Periodo del agente de reparación. |
 | `DTN_SCRUB_INTERVAL_SECONDS` | 3600 | Periodo de la comprobación de integridad en segundo plano. |
 | `DTN_GC_GRACE_SECONDS` | 86400 | Antigüedad mínima de un objeto sin uso para borrarlo. |
+| `DTN_UPLOAD_TIMEOUT_SECONDS` | 600 | Plazo total de una subida. |
+| `DTN_SEARCH_TIMEOUT_MS` | 2000 | Plazo total de una búsqueda; los almacenes que no responden antes quedan como no respondidos. |
+| `DTN_WITHDRAW_TIMEOUT_SECONDS` | 30 | Plazo total de una retirada. |
+| `DTN_MAX_UPLOAD_SECONDS` | 1200 | Duración máxima del audio de una subida. |
+| `DTN_MAX_UPLOAD_BYTES` | 209715200 | Tamaño máximo del archivo subido (200 MB). |
 
 Los valores por defecto son un punto de partida y se ajustarán con mediciones.
 
@@ -742,4 +1057,4 @@ Los valores por defecto son un punto de partida y se ajustarán con mediciones.
 
 ## Cuestiones abiertas
 
-- **Una máquina o varios nodos.** Con todos los almacenes en una máquina solo se prueban caídas de proceso. Repartirlos en varios nodos acercaría las caídas a fallos independientes y permitiría inyectar fallos de red reales (nodo lento, pérdida de paquetes), a cambio de una puesta en marcha más compleja.
+- **Una máquina o varios nodos.** Lo que se promete ante almacenes inaccesibles ya está fijado (ver «Modelo de fallos»); queda decidir cómo se prueba. Con todos los almacenes en una máquina solo se prueban caídas de proceso. Repartirlos en varios nodos acercaría las caídas a fallos independientes y permitiría inyectar fallos de red reales (nodo lento, pérdida de paquetes), a cambio de una puesta en marcha más compleja.
