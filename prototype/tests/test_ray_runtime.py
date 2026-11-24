@@ -13,6 +13,8 @@ import pytest
 import ray
 from ray.exceptions import ActorDiedError, GetTimeoutError, RayActorError
 
+from dtn.errors import Unavailable
+
 
 @ray.remote
 class Box:
@@ -33,6 +35,9 @@ class Box:
     def slow(self, seconds):
         time.sleep(seconds)
         return "done"
+
+    def fail_unavailable(self):
+        raise Unavailable("store is busy", saturated=True, op_id="op-7")
 
 
 def test_actor_keeps_state_between_calls(ray_runtime):
@@ -87,3 +92,16 @@ def test_killed_actor_is_not_restarted_by_default(ray_runtime):
     for _ in range(2):
         with pytest.raises(ActorDiedError):
             ray.get(box.pid.remote(), timeout=10)
+
+
+def test_application_error_reaches_the_driver_with_its_class_and_fields(ray_runtime):
+    """An error raised inside an actor can be caught in the driver by its own class.
+
+    The client tells NotFound, Unavailable and Corrupt apart by type (P5), and
+    reads fields such as ``saturated``, so both must survive the trip.
+    """
+    box = Box.remote()
+    with pytest.raises(Unavailable) as excinfo:
+        ray.get(box.fail_unavailable.remote(), timeout=10)
+    assert excinfo.value.saturated is True
+    assert excinfo.value.op_id == "op-7"
