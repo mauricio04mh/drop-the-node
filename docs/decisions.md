@@ -198,6 +198,30 @@ El identificador de una pista es el hash de su manifiesto, y el de una lápida, 
 
 ---
 
+## Cómo se normalizan los textos de una pista
+
+### El problema
+
+El identificador de una pista depende de los bytes de su título y su artista. Un mismo texto puede llegar con bytes distintos: «Café» puede escribirse con la «é» como un solo carácter o como «e» seguida de un acento combinado, según el sistema o el teclado, y a veces con espacios de más al principio o al final. Sin tratarlo, la misma subida hecha desde dos máquinas produce dos pistas distintas y la repetición segura deja de funcionar entre clientes.
+
+### Posibles soluciones
+
+**Guardar el texto tal como llega.** Respeta exactamente lo escrito, pero el mismo título puede dar dos identificadores.
+
+**Normalizar a NFC y quitar los espacios de los extremos.** NFC es la forma estándar de Unicode que escribe cada letra acentuada como un solo carácter. El texto que se ve es el mismo, y los bytes, también.
+
+**Normalizar además mayúsculas y tildes.** También unificaría «Cafe» y «CAFÉ», pero cambia lo que el usuario escribió y lo que se muestra.
+
+### Decisión
+
+**NFC y sin espacios en los extremos.** Se aplica al validar los metadatos y al motivo de una retirada, antes de construir el manifiesto o la lápida. Los límites de longitud se miden después de normalizar. `decode_object` solo reconoce manifiestos y lápidas con los textos ya normalizados, para que un mismo contenido no tenga dos formas válidas. Las mayúsculas y las tildes solo se ignoran al buscar (ver «Cómo se busca una pista»), no al guardar.
+
+| Tipo | Declaración |
+|---|---|
+| Corrección | El mismo título, artista o motivo escrito con distinta composición Unicode o con espacios en los extremos produce el mismo identificador. |
+
+---
+
 ## Cómo se busca una pista
 
 ### El problema
@@ -914,7 +938,7 @@ La biblioteca del cliente es la interfaz para otro programa. Para usar el sistem
 | `dtn play TRACK_ID [--headless]` | Los eventos de la sesión, uno por línea, y un resumen al final. |
 | `dtn withdraw TRACK_ID --reason MOTIVO` | Nada si tiene éxito. |
 
-Códigos de salida: 0 éxito (en las búsquedas, también si el resultado es incompleto, que se indica en la salida); 2 `Invalid`; 3 `NotFound`; 4 `Unavailable`; 5 `Conflict`. Toda orden admite `--json`.
+Códigos de salida: 0 éxito (en las búsquedas, también si el resultado es incompleto, que se indica en la salida); 2 `Invalid`; 3 `NotFound`; 4 `Unavailable`; 5 `Conflict`; 1 cualquier otro final (una operación que todavía no existe o un error del propio programa), para que un guion no lo confunda con un resultado del contrato. Toda orden admite `--json`.
 
 **Eventos de una reproducción:** `started` (con el tiempo hasta empezar a sonar), `source_switch` (almacén abandonado, almacén nuevo y motivo), `stall_start` y `stall_end` (un corte y su duración), `finished` y `failed`. El resumen final da el número de cortes, su duración total, el número de cambios de fuente y los segmentos obtenidos de cada almacén. Son los datos que necesitan los experimentos.
 
