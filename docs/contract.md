@@ -27,8 +27,8 @@ Una pista es audio con sus metadatos, subido una vez y nunca editado. Para corre
 
 | Campo | Lo da | Reglas |
 |---|---|---|
-| `title` | quien sube | Texto no vacío, de como mucho 200 caracteres (ver «Cuánto puede durar una operación»). |
-| `artist` | quien sube | Texto no vacío, de como mucho 200 caracteres. |
+| `title` | quien sube | Texto no vacío, de como mucho 200 caracteres, en NFC y sin espacios en los extremos (ver «Cuánto puede durar una operación» y «Cómo se normalizan los textos de una pista»). |
+| `artist` | quien sube | Las mismas reglas que `title`. |
 | `license` | quien sube | Obligatoria, de una lista cerrada: `CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`, `CC-BY-NC-4.0`, `public-domain`. |
 | `duration` | el sistema | Segundos, calculada a partir de los segmentos. Si quien sube la envía, se rechaza con `Invalid`. |
 
@@ -302,6 +302,7 @@ dtn withdraw TRACK_ID --reason MOTIVO
 | 3 | `NotFound` |
 | 4 | `Unavailable` (en `upload` y `withdraw`, resultado incierto) |
 | 5 | `Conflict` |
+| 1 | Cualquier otro final: una operación que todavía no existe o un error del propio programa. |
 
 Toda salida tiene también una versión en JSON (`--json`) para procesarla en los experimentos.
 
