@@ -33,6 +33,7 @@ from dtn.objects import (
     encode_tombstone,
     make_manifest,
     normalize_text,
+    require_utf8,
     validate_metadata,
     validate_query,
 )
@@ -142,13 +143,18 @@ class Client:
             metadata = validate_metadata(raw_metadata)
         except Invalid as exc:
             raise Invalid(exc.message, op_id=op_id) from None
+        if not path.is_file():
+            raise Invalid(f"{path} is not a readable file", op_id=op_id)
         try:
             size = path.stat().st_size
         except OSError as exc:
             raise Invalid(f"cannot read {path}: {exc.strerror}", op_id=op_id) from None
         if size > self.config.max_upload_bytes:
             raise Invalid(f"file is {size} bytes, more than the limit of {self.config.max_upload_bytes}", op_id=op_id)
-        original = path.read_bytes()
+        try:
+            original = path.read_bytes()
+        except OSError as exc:
+            raise Invalid(f"cannot read {path}: {exc.strerror}", op_id=op_id) from None
 
         # 2. Re-encode. Same file and settings give the same bytes.
         try:
@@ -184,8 +190,15 @@ class Client:
                 pool.submit(self.cluster.put, obj_id, data, deadline=deadline, op_id=op_id)
                 for obj_id, data in objects.items()
             ]
-            for future in futures:
-                future.result()  # re-raises the first failure: the outcome is then uncertain
+            try:
+                for future in futures:
+                    future.result()  # re-raises the first failure: the outcome is then uncertain
+            except BaseException:
+                # No point writing the rest: the upload already failed. Writes in
+                # progress finish; those not started are dropped.
+                for future in futures:
+                    future.cancel()
+                raise
 
         # 6. The manifest last: from now on the track is visible, and when it has
         #    N replicas, confirmed.
@@ -243,6 +256,10 @@ class Client:
         if not isinstance(reason, str) or not normalize_text(reason):
             raise Invalid("reason must not be empty", op_id=op_id)
         reason = normalize_text(reason)
+        try:
+            require_utf8(reason, "reason")
+        except Invalid as exc:
+            raise Invalid(exc.message, op_id=op_id) from None
         deadline = time.monotonic() + self.config.withdraw_timeout_seconds
         log.info("withdraw start op=%s track=%s", op_id, track_id)
 

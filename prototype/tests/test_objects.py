@@ -215,3 +215,14 @@ def test_non_matching_queries(query):
 def test_a_word_must_fit_inside_one_field():
     # "ana" is in the artist and "del" in the title, but "anadel" is in neither.
     assert not matches(manifest(), "anadel")
+
+
+def test_text_that_is_not_utf8_is_invalid():
+    # A command-line argument with bytes that are not UTF-8 arrives as a lone surrogate.
+    with pytest.raises(Invalid):
+        validate_metadata({"title": "caf\udce9", "artist": "Ana", "license": "CC0-1.0"})
+
+
+def test_unknown_fields_of_any_type_are_reported():
+    with pytest.raises(Invalid, match="unknown metadata fields"):
+        validate_metadata({1: "x", "x": 2, "title": "a", "artist": "b", "license": "CC0-1.0"})

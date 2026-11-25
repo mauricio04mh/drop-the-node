@@ -141,11 +141,12 @@ class FakeCluster:
     def get(self, obj_id: str, *, deadline: float, op_id: str) -> bytes:
         if self._expired(deadline):
             raise Unavailable("deadline passed before reading", op_id=op_id)
-        alive = self._alive()
-        for name in placement_order(alive, obj_id):
-            data = self._store[name].objects.get(obj_id)
-            if data is not None and sha256_hex(data) == obj_id:
-                return data
+        with self._lock:
+            alive = self._alive()
+            for name in placement_order(alive, obj_id):
+                data = self._store[name].objects.get(obj_id)
+                if data is not None and sha256_hex(data) == obj_id:
+                    return data
         unreachable = len(self.stores) - len(alive)
         if unreachable < self.replicas:
             raise NotFound(f"no store has {obj_id}", op_id=op_id)
@@ -157,9 +158,10 @@ class FakeCluster:
         if self._expired(deadline):
             return Scattered(responses={}, unreachable=self.stores)
         responses, unreachable = {}, []
-        for name in self.stores:
-            if name in self._down:
-                unreachable.append(name)
-            else:
-                responses[name] = getattr(self._store[name], method)(*args)
+        with self._lock:  # uploads write from other threads
+            for name in self.stores:
+                if name in self._down:
+                    unreachable.append(name)
+                else:
+                    responses[name] = getattr(self._store[name], method)(*args)
         return Scattered(responses=responses, unreachable=tuple(unreachable))

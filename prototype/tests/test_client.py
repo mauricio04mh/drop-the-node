@@ -269,3 +269,63 @@ def test_real_upload_with_ffmpeg_is_idempotent(cluster, tmp_path):
     manifest = decode_object(cluster.get(track_id, deadline=1e18, op_id="t"))
     assert len(manifest.segments) == 3 and abs(manifest.duration_ms - 5000) < 50
     assert json.loads(cluster.get(track_id, deadline=1e18, op_id="t"))["type"] == "manifest"
+
+
+def test_uploading_a_directory_is_invalid(cluster, client, tmp_path):
+    with pytest.raises(Invalid):
+        client.upload(tmp_path, md())
+    assert cluster.all_ids() == set()
+
+
+def test_reason_that_is_not_utf8_is_invalid(client, song):
+    track_id = client.upload(song, md())
+    with pytest.raises(Invalid):
+        client.withdraw(track_id, "x\udcff")
+
+
+def test_concurrent_uploads_and_searches(cluster, client, tmp_path):
+    import threading
+
+    files = []
+    for i in range(10):
+        path = tmp_path / f"{i}.wav"
+        path.write_bytes(f"audio {i}".encode() * 50)
+        files.append(path)
+    errors, ids_seen = [], []
+
+    def upload(path):
+        try:
+            ids_seen.append(client.upload(path, md(path.stem, "Ana")))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def search():
+        for _ in range(50):
+            try:
+                client.list()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=upload, args=(p,)) for p in files * 2]
+    threads += [threading.Thread(target=search) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(set(ids_seen)) == 10 and len(client.list().tracks) == 10
+
+
+def test_a_failed_write_stops_the_remaining_ones(cluster, tmp_path):
+    def many_segments(path, config, timeout):
+        return EncodedAudio(init=b"init", segments=tuple((f"seg {i}".encode(), 2000) for i in range(50)))
+
+    path = tmp_path / "long.wav"
+    path.write_bytes(b"long")
+    cluster.fail_put_after(sha256_hex(b"long"), 0)  # the original is submitted first and fails at once
+    client = Client(cluster, ClientConfig(upload_parallelism=1), encoder=many_segments)
+    with pytest.raises(Unavailable):
+        client.upload(path, md("Larga"))
+    assert len(cluster.all_ids()) < 52  # not every object was written
+    assert not any(isinstance(decode_object(d), Manifest)
+                   for n in cluster.stores for d in cluster.store(n).objects.values())

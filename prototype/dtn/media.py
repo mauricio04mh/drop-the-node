@@ -64,7 +64,9 @@ def check_file(path: str | os.PathLike, limits: MediaLimits, *, timeout: float) 
     Returns its duration in seconds. Raises ``Invalid`` if the file is too big,
     is not audio, or is too long; ``Unavailable`` if probing exceeds ``timeout``.
     """
-    path = Path(path)
+    # Absolute path: a relative name starting with "-" would be read as an
+    # option, and one with ":" as a protocol (http:, pipe:...).
+    path = Path(path).resolve()
     try:
         size = path.stat().st_size
     except OSError as exc:
@@ -75,7 +77,7 @@ def check_file(path: str | os.PathLike, limits: MediaLimits, *, timeout: float) 
         raise Invalid("file is empty")
     try:
         out = subprocess.run(
-            [FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type:format=duration",
+            [FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type,duration:format=duration",
              "-of", "json", str(path)],
             capture_output=True, text=True, timeout=timeout,
         )
@@ -89,10 +91,14 @@ def check_file(path: str | os.PathLike, limits: MediaLimits, *, timeout: float) 
         info = {}
     if out.returncode != 0 or not info.get("streams"):
         raise Invalid("file is not decodable audio")
-    try:
-        duration = float(info.get("format", {}).get("duration", "nan"))
-    except (TypeError, ValueError):
-        duration = float("nan")
+    duration = float("nan")
+    # Some containers only state the duration of the stream, not of the file.
+    for raw in (info.get("format", {}).get("duration"), info["streams"][0].get("duration")):
+        try:
+            duration = float(raw)
+        except (TypeError, ValueError):
+            continue
+        break
     if not duration > 0:
         raise Invalid("cannot determine the duration of the audio")
     if duration > limits.max_seconds:
@@ -149,7 +155,10 @@ def encode(path: str | os.PathLike, settings: EncodingSettings, *, timeout: floa
         if out.returncode != 0:
             raise Invalid(f"ffmpeg could not re-encode the file: {out.stderr.strip()[-300:]}")
         tmp = Path(tmp)
-        entries = _parse_playlist((tmp / "list.m3u8").read_text())
+        playlist = tmp / "list.m3u8"
+        if not playlist.is_file() or not (tmp / "init.mp4").is_file():
+            raise Invalid("re-encoding produced no audio")
+        entries = _parse_playlist(playlist.read_text())
         if not entries:
             raise Invalid("re-encoding produced no audio")
         segments = tuple(((tmp / name).read_bytes(), ms) for name, ms in entries)

@@ -1,6 +1,7 @@
 """Re-encoding with ffmpeg: validation, segmenting and determinism."""
 
 import hashlib
+import os
 import shutil
 import subprocess
 
@@ -92,3 +93,24 @@ def test_missing_file_is_invalid(tmp_path):
 
 def test_ffmpeg_version_is_reported():
     assert ffmpeg_version().startswith("ffmpeg version")
+
+
+def test_file_names_are_not_read_as_options(tmp_path, monkeypatch):
+    make_audio(tmp_path / "-raro.wav", 2)
+    monkeypatch.chdir(tmp_path)
+    assert check_file("-raro.wav", MediaLimits(), timeout=30) == pytest.approx(2, abs=0.1)
+    assert encode("-raro.wav", EncodingSettings(), timeout=60).segments
+
+
+def test_duration_of_a_stream_without_container_duration(tmp_path):
+    raw = tmp_path / "a.aac"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=duration=3",
+                    "-c:a", "aac", "-f", "adts", str(raw)], check=True)
+    assert check_file(raw, MediaLimits(), timeout=30) == pytest.approx(3, abs=0.2)
+
+
+@pytest.mark.skipif(not os.environ.get("DTN_TEST_AUDIO"), reason="set DTN_TEST_AUDIO to a real song to run it")
+def test_real_song_encodes_deterministically():
+    path = os.environ["DTN_TEST_AUDIO"]
+    check_file(path, MediaLimits(), timeout=60)
+    assert digest(encode(path, EncodingSettings(), timeout=600)) == digest(encode(path, EncodingSettings(), timeout=600))

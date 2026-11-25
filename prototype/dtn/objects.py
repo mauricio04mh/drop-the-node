@@ -74,6 +74,19 @@ def normalize_text(value: str) -> str:
     return unicodedata.normalize("NFC", value).strip()
 
 
+def require_utf8(value: str, name: str) -> str:
+    """Raise ``Invalid`` if ``value`` cannot be written as UTF-8.
+
+    Python strings can hold lone surrogates, for example when a command-line
+    argument has bytes that are not UTF-8. They cannot go into a manifest.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise Invalid(f"{name} is not valid text") from None
+    return value
+
+
 def validate_metadata(raw: Mapping[str, object]) -> Metadata:
     """Check user-supplied metadata and return it normalized.
 
@@ -85,15 +98,16 @@ def validate_metadata(raw: Mapping[str, object]) -> Metadata:
     """
     if not isinstance(raw, Mapping):
         raise Invalid("metadata must be a mapping")
-    unknown = sorted(set(raw) - {"title", "artist", "license"})
+    unknown = sorted(map(repr, set(raw) - {"title", "artist", "license"}))
     if unknown:
-        raise Invalid(f"unknown metadata fields: {', '.join(map(str, unknown))}")
+        raise Invalid(f"unknown metadata fields: {', '.join(unknown)}")
     texts = {}
     for name in ("title", "artist"):
         value = raw.get(name)
         if not isinstance(value, str):
             raise Invalid(f"{name} must be a string")
         value = normalize_text(value)
+        require_utf8(value, name)
         if not value:
             raise Invalid(f"{name} must not be empty")
         if len(value) > MAX_TEXT_CHARS:
