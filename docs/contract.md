@@ -351,13 +351,13 @@ Entrega un objeto.
 | `Invalid` | `id` mal formado. |
 | `Unavailable` | Saturación o error de disco. |
 
-#### `inventory() → [{id, bytes, age_seconds}]`
+#### `inventory() → [{id, bytes, age_seconds, kind}]`
 
-Lista los objetos que guarda: su tamaño y su antigüedad, con la definición de `delete_if_older`. No incluye los objetos en cuarentena. Es una foto: un objeto escrito mientras se responde puede aparecer o no. La usa el agente de reparación (ver «Cómo se recupera la redundancia perdida»).
+Lista los objetos que guarda: su tamaño, su antigüedad, con la definición de `delete_if_older`, y su tipo: `manifest`, `tombstone` o `data` (segmentos y originales). El agente de reparación necesita el tipo para copiar las lápidas a todos los almacenes y para no borrar nunca manifiestos ni lápidas. No incluye los objetos en cuarentena. Es una foto: un objeto escrito mientras se responde puede aparecer o no. La usa el agente de reparación (ver «Cómo se recupera la redundancia perdida»).
 
 #### `search(query) → {manifests: [{track_id, manifest}], tombstoned: [{track_id, original}]}`
 
-Aplica la regla de búsqueda a sus manifiestos (ver «Cómo se busca una pista») y devuelve los que coinciden, cada uno con su identificador. Devuelve además el `track_id` y el `original` de **todas** las lápidas que guarda, porque la lápida de una pista puede estar en un almacén distinto de su manifiesto, o ser de otra pista con el mismo archivo original. Comprueba el hash de cada manifiesto antes de devolverlo y aparta los dañados.
+Aplica la regla de búsqueda a sus manifiestos (ver «Cómo se busca una pista») y devuelve los que coinciden, cada uno con su identificador. Devuelve además el `track_id` y el `original` de **todas** las lápidas que guarda, porque la lápida de una pista puede estar en un almacén distinto de su manifiesto, o ser de otra pista con el mismo archivo original. Los manifiestos salen de su índice en memoria, que solo contiene copias cuyo hash se comprobó al guardarlas o al arrancar el almacén, así que lo devuelto nunca está dañado. No vuelve a leer el disco en cada búsqueda: si después se daña el archivo de un manifiesto, lo detectan la siguiente lectura o la revisión periódica, que lo apartan (ver «Cómo se detecta la corrupción»).
 
 | Error | Cuándo |
 |---|---|
@@ -383,9 +383,9 @@ Borra el objeto solo si su antigüedad supera `seconds`. La antigüedad es el ti
 | Corrección | Un objeto escrito hace menos de `seconds` nunca se borra, aunque el almacén se reinicie entre medias o cambie la hora del sistema. |
 | Límite | Tras cada reinicio, todos los objetos vuelven a tener antigüedad 0: un almacén que se reinicia más a menudo que `seconds` no borra nada. |
 
-#### `ping() → {store, incarnation, objects}`
+#### `ping() → {store, incarnation, objects, num_stores, replicas}`
 
-Responde con su nombre lógico, un identificador de esta ejecución del proceso, que cambia en cada reinicio (solo para diagnóstico, principio P1), y el número de objetos que guarda. No toca el disco. La usan el detector de fallos para readmitir almacenes sospechosos y los guiones de diagnóstico (ver «Cómo se detecta que un almacén falla»).
+Responde con su nombre lógico, un identificador de esta ejecución del proceso, que cambia en cada reinicio (principio P1: nunca identifica al almacén, solo a su ejecución), el número de objetos que guarda y los valores de S y N con que arrancó. No toca el disco. La usan el detector de fallos para readmitir almacenes sospechosos, el agente de reparación para notar que un almacén cayó o volvió (ver «Cómo se recupera la redundancia perdida»), los clientes al conectarse para comprobar que usan el mismo S y el mismo N (ver «Cómo sabe cada cliente qué almacenes existen») y los guiones de diagnóstico.
 
 ---
 
