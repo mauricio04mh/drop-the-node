@@ -6,6 +6,7 @@ Implementación de drop-the-node sobre Ray Core. Ray actúa como middleware: se 
 
 - Linux.
 - Python 3.12 o superior.
+- `ffmpeg` y `ffprobe` con el codificador `libopus` (`sudo apt install ffmpeg`). La versión forma parte de la configuración: otra versión puede producir otros bytes para el mismo archivo.
 
 ## Instalación
 
@@ -51,6 +52,17 @@ Cada almacén guarda sus objetos en `DTN_DATA_DIR/<nombre>` (por defecto `./data
 
 El agente de reparación repone las réplicas perdidas y borra los objetos que ninguna pista usa. Hace una ronda cada `DTN_REPAIR_INTERVAL_SECONDS`, otra en cuanto un almacén deja de responder o vuelve con una encarnación nueva, y otra cuando un almacén lleva `DTN_STORE_LOST_SECONDS` sin responder: solo entonces lo da por perdido y repone lo que guardaba.
 
+## Uso
+
+```bash
+python3 -m dtn upload cancion.flac --title "Canción" --artist "Ana" --license CC-BY-4.0
+python3 -m dtn search mar
+python3 -m dtn list
+python3 -m dtn withdraw TRACK_ID --reason "sin licencia"
+```
+
+Todas las órdenes admiten `--json`, y el código de salida indica cómo terminó la operación (ver `docs/contract.md` § 6). Hasta que la orden `dtn` se conecte a los almacenes, responde que el almacenamiento no está disponible; las pruebas de las operaciones usan `FakeCluster`.
+
 ## Estructura
 
 ```text
@@ -59,6 +71,22 @@ prototype/
 ├── requirements.txt   versiones fijas de Ray y pytest
 ├── pytest.ini         configuración de las pruebas
 ├── dtn/               código del prototipo
+│   ├── errors.py      clases de error (P5)
+│   ├── ids.py         identificadores SHA-256 (P2)
+│   ├── objects.py     manifiestos, lápidas, metadatos y búsqueda
+│   ├── media.py       recodificación con ffmpeg
+│   ├── cluster.py     interfaz con el almacenamiento replicado
+│   ├── fake_cluster.py  almacenamiento en memoria para las pruebas
+│   ├── client.py      upload, search, list y withdraw
+│   ├── cli.py         la orden dtn (python3 -m dtn)
+│   ├── config.py      configuración del almacenamiento (P6)
+│   ├── store.py       un almacén: disco, integridad y antigüedad, sin Ray
+│   ├── store_actor.py el almacén como actor de Ray
+│   ├── placement.py   orden de colocación de cada objeto
+│   ├── detector.py    detector de fallos adaptativo
+│   ├── ray_cluster.py almacenamiento replicado sobre los actores
+│   ├── repair.py      agente de reparación y limpieza
+│   └── admin.py       arrancar, consultar y matar almacenes
 └── tests/             pruebas
     └── conftest.py    arranca una instancia local de Ray para las pruebas
 ```
