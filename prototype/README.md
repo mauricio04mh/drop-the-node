@@ -61,7 +61,7 @@ python3 -m dtn list
 python3 -m dtn withdraw TRACK_ID --reason "sin licencia"
 ```
 
-Todas las órdenes admiten `--json`, y el código de salida indica cómo terminó la operación (ver `docs/contract.md` § 6). Hasta que la orden `dtn` se conecte a los almacenes, responde que el almacenamiento no está disponible; las pruebas de las operaciones usan `FakeCluster`.
+Las órdenes se conectan a los almacenes arrancados con `python3 -m dtn.admin start` (ver «Arrancar los almacenes»); si no hay ninguno en marcha, lo dicen y terminan con el código 4. Todas admiten `--json`, y el código de salida indica cómo terminó la operación (ver `docs/contract.md` § 6). La configuración se lee de las variables `DTN_*` (ver «Parámetros» en `docs/decisions.md`); `DTN_RAY_NAMESPACE` elige el espacio de nombres de Ray, `dtn` por defecto.
 
 ## Estructura
 

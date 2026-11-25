@@ -215,9 +215,9 @@ def _decode_tombstone(doc: dict) -> Tombstone | None:
         return None
     if not (is_valid_id(doc["track_id"]) and is_valid_id(doc["original"])):
         return None
-    reason = doc["reason"]
-    if not (isinstance(reason, str) and reason and normalize_text(reason) == reason):
+    if not _is_text(doc["reason"]):
         return None
+    reason = doc["reason"]
     return Tombstone(track_id=doc["track_id"], original=doc["original"], reason=reason)
 
 

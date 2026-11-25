@@ -48,7 +48,7 @@ def test_upload_prints_the_track_id(run, song):
 def test_search_text_and_json(run, song):
     track_id = upload(run, song)
     code, out, _ = run("search", "mar")
-    assert code == 0 and track_id in out and "resultado completo" in out
+    assert code == 0 and track_id in out and "1 track · complete result" in out
     code, out, _ = run("--json", "search", "mar")
     doc = json.loads(out)
     assert doc["complete"] is True and doc["tracks"][0]["track_id"] == track_id
@@ -60,7 +60,7 @@ def test_incomplete_search_still_exits_0_and_says_so(run, cluster, song):
     upload(run, song)
     cluster.down("store-1", "store-2", "store-3")
     code, out, _ = run("list")
-    assert code == 0 and "INCOMPLETO" in out and "store-1, store-2, store-3" in out
+    assert code == 0 and "INCOMPLETE" in out and "store-1, store-2, store-3" in out
 
 
 def test_exit_codes(run, cluster, song):
@@ -71,7 +71,7 @@ def test_exit_codes(run, cluster, song):
     assert run("upload", song, "--title", "Mar", "--artist", "Ana", "--license", "CC0-1.0")[0] == 5
     cluster.down("store-1", "store-2", "store-3")
     code, _, err = run("withdraw", "f" * 64, "--reason", "x")
-    assert code == 4 and "incierto" in err
+    assert code == 4 and "uncertain outcome" in err
 
 
 def test_errors_in_json(run):
@@ -85,7 +85,29 @@ def test_play_is_declared_but_not_implemented(run):
     assert code == 1 and "not implemented" in err
 
 
-def test_without_storage_the_command_says_so(song):
+def test_without_a_ray_cluster_the_command_says_what_to_start(monkeypatch):
+    import ray
+
+    def no_cluster(*args, **kwargs):
+        raise ConnectionError("no cluster")
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    monkeypatch.setattr(ray, "init", no_cluster)
+    err = io.StringIO()
+    assert main(["list"], err=err, out=io.StringIO()) == 4
+    assert "ray start --head" in err.getvalue()
+    assert "uncertain" not in err.getvalue()  # nothing was attempted
+
+
+def test_without_stores_the_command_says_what_to_start(ray_runtime, monkeypatch):
+    monkeypatch.setenv("DTN_RAY_NAMESPACE", "no-stores-here")
+    err = io.StringIO()
+    assert main(["list"], err=err, out=io.StringIO()) == 4
+    assert "dtn.admin start" in err.getvalue()
+
+
+def test_a_configuration_error_exits_with_1(monkeypatch):
+    monkeypatch.setenv("DTN_REPLICAS", "many")
     err = io.StringIO()
     assert main(["list"], err=err, out=io.StringIO()) == 1
-    assert "not available" in err.getvalue()
+    assert "ConfigError" in err.getvalue() and "DTN_REPLICAS" in err.getvalue()
