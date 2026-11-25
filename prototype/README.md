@@ -33,6 +33,24 @@ python3 -m pytest -v        # una línea por prueba
 
 `tests/test_ray_runtime.py` comprueba los comportamientos de Ray de los que depende el diseño. Por ejemplo, que un actor conserva su estado entre llamadas, que llamar a un actor muerto lanza `ActorDiedError` y que un actor muerto no se reinicia por defecto. 
 
+## Arrancar los almacenes
+
+Los almacenes y el agente de reparación son actores de Ray con nombre que siguen vivos entre una orden y otra, así que primero hace falta un cluster de Ray en marcha en esta máquina:
+
+```bash
+ray start --head
+python3 -m dtn.admin start           # arranca los almacenes y el agente (si ya están, no hace nada)
+python3 -m dtn.admin status          # pregunta a cada almacén y muestra la última ronda de reparación
+python3 -m dtn.admin repair          # ejecuta ahora una ronda de reparación
+python3 -m dtn.admin crash store-2   # mata con SIGKILL el proceso de un almacén (o del agente: repair)
+python3 -m dtn.admin stop            # elimina los almacenes y el agente; los datos quedan en disco
+ray stop
+```
+
+Cada almacén guarda sus objetos en `DTN_DATA_DIR/<nombre>` (por defecto `./data`). La primera vez, `start` guarda S y N en `DTN_DATA_DIR/cluster.json`, y después se niega a arrancar con otros valores. Un cliente que se conecta con otro `DTN_NUM_STORES` u otro `DTN_REPLICAS` que los almacenes también se detiene con un error. Tras un `crash`, Ray lo vuelve a arrancar solo y el almacén reconstruye su índice desde disco; `status` lo muestra con una encarnación nueva.
+
+El agente de reparación repone las réplicas perdidas y borra los objetos que ninguna pista usa. Hace una ronda cada `DTN_REPAIR_INTERVAL_SECONDS`, otra en cuanto un almacén deja de responder o vuelve con una encarnación nueva, y otra cuando un almacén lleva `DTN_STORE_LOST_SECONDS` sin responder: solo entonces lo da por perdido y repone lo que guardaba.
+
 ## Estructura
 
 ```text
