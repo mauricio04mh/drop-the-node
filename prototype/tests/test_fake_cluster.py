@@ -5,7 +5,8 @@ import time
 import pytest
 
 from dtn.errors import Invalid, NotFound, Unavailable
-from dtn.fake_cluster import FakeCluster, placement_order
+from dtn.fake_cluster import FakeCluster
+from dtn.placement import placement_order
 from dtn.ids import sha256_hex
 
 DATA = b"some object"
@@ -19,12 +20,12 @@ def far():
 def test_put_writes_n_replicas_in_placement_order():
     c = FakeCluster()
     c.put(OID, DATA, deadline=far(), op_id="t")
-    assert sorted(c.holders(OID)) == sorted(placement_order(c.stores, OID)[:3])
+    assert sorted(c.holders(OID)) == sorted(placement_order(OID, c.stores)[:3])
 
 
 def test_put_skips_down_stores():
     c = FakeCluster()
-    first = placement_order(c.stores, OID)[0]
+    first = placement_order(OID, c.stores)[0]
     c.down(first)
     c.put(OID, DATA, deadline=far(), op_id="t")
     assert first not in c.holders(OID) and len(c.holders(OID)) == 3

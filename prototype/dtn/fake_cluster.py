@@ -10,21 +10,15 @@ It also holds the in-memory equivalent of the store-side ``search`` and
 ``tombstones`` calls (contract § 7), which ``scatter`` dispatches to.
 """
 
-import hashlib
 import threading
 import time
-from collections.abc import Iterable
 from typing import Any
 
 from dtn.cluster import Scattered
 from dtn.errors import Invalid, NotFound, Unavailable
 from dtn.ids import require_id, sha256_hex
 from dtn.objects import Manifest, Tombstone, decode_object, matches, validate_query
-
-
-def placement_order(stores: Iterable[str], obj_id: str) -> list[str]:
-    """Rendezvous hashing: stores sorted by SHA-256(name ‖ id), highest first."""
-    return sorted(stores, key=lambda s: hashlib.sha256(f"{s}{obj_id}".encode()).digest(), reverse=True)
+from dtn.placement import placement_order
 
 
 class FakeStore:
@@ -114,7 +108,7 @@ class FakeCluster:
         with self._lock:
             budget = self._fail_after.pop(obj_id, None)
             written = 0
-            for name in placement_order(self._alive(), obj_id):
+            for name in placement_order(obj_id, self._alive()):
                 if written == self.replicas:
                     break
                 if budget is not None and written == budget:
@@ -143,7 +137,7 @@ class FakeCluster:
             raise Unavailable("deadline passed before reading", op_id=op_id)
         with self._lock:
             alive = self._alive()
-            for name in placement_order(alive, obj_id):
+            for name in placement_order(obj_id, alive):
                 data = self._store[name].objects.get(obj_id)
                 if data is not None and sha256_hex(data) == obj_id:
                     return data
@@ -154,7 +148,7 @@ class FakeCluster:
 
     def scatter(self, method: str, *args: Any, deadline: float, op_id: str) -> Scattered:
         if method not in ("search", "tombstones"):
-            raise ValueError(f"unknown store method {method!r}")
+            raise Invalid(f"cannot scatter {method!r}", op_id=op_id)
         if self._expired(deadline):
             return Scattered(responses={}, unreachable=self.stores)
         responses, unreachable = {}, []
