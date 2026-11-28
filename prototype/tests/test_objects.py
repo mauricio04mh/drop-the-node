@@ -226,3 +226,10 @@ def test_text_that_is_not_utf8_is_invalid():
 def test_unknown_fields_of_any_type_are_reported():
     with pytest.raises(Invalid, match="unknown metadata fields"):
         validate_metadata({1: "x", "x": 2, "title": "a", "artist": "b", "license": "CC0-1.0"})
+
+
+def test_tombstone_with_an_overlong_reason_is_not_recognized():
+    long_reason = Tombstone(track_id="a" * 64, original="b" * 64, reason="x" * 201)
+    assert decode_object(encode_tombstone(long_reason)) is None
+    ok = Tombstone(track_id="a" * 64, original="b" * 64, reason="x" * 200)
+    assert decode_object(encode_tombstone(ok)) == ok

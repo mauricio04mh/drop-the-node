@@ -22,9 +22,11 @@ from pathlib import Path
 
 from dtn import media
 from dtn.cluster import Cluster, Scattered
+from dtn.config import ClientConfig
 from dtn.errors import Conflict, Invalid, NotFound, Unavailable
 from dtn.ids import require_id, sha256_hex
 from dtn.objects import (
+    MAX_TEXT_CHARS,
     Manifest,
     Segment,
     Tombstone,
@@ -39,38 +41,6 @@ from dtn.objects import (
 )
 
 log = logging.getLogger("dtn.client")
-
-
-@dataclass(frozen=True)
-class ClientConfig:
-    """Parameters of the track operations. ``config.py`` builds it from the
-    ``DTN_*`` variables; the defaults are those of «Parámetros»."""
-
-    upload_timeout_seconds: float = 600
-    search_timeout_ms: float = 2000
-    withdraw_timeout_seconds: float = 30
-    upload_parallelism: int = 8
-    segment_seconds: int = 2
-    audio_bitrate: str = "128k"
-    max_upload_seconds: float = 1200
-    max_upload_bytes: int = 209_715_200
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] = os.environ) -> "ClientConfig":
-        def read(name, kind, default):
-            return kind(env[name]) if name in env else default
-
-        d = cls()
-        return cls(
-            upload_timeout_seconds=read("DTN_UPLOAD_TIMEOUT_SECONDS", float, d.upload_timeout_seconds),
-            search_timeout_ms=read("DTN_SEARCH_TIMEOUT_MS", float, d.search_timeout_ms),
-            withdraw_timeout_seconds=read("DTN_WITHDRAW_TIMEOUT_SECONDS", float, d.withdraw_timeout_seconds),
-            upload_parallelism=read("DTN_UPLOAD_PARALLELISM", int, d.upload_parallelism),
-            segment_seconds=read("DTN_SEGMENT_SECONDS", int, d.segment_seconds),
-            audio_bitrate=read("DTN_AUDIO_BITRATE", str, d.audio_bitrate),
-            max_upload_seconds=read("DTN_MAX_UPLOAD_SECONDS", float, d.max_upload_seconds),
-            max_upload_bytes=read("DTN_MAX_UPLOAD_BYTES", int, d.max_upload_bytes),
-        )
 
 
 @dataclass(frozen=True)
@@ -256,6 +226,9 @@ class Client:
         if not isinstance(reason, str) or not normalize_text(reason):
             raise Invalid("reason must not be empty", op_id=op_id)
         reason = normalize_text(reason)
+        if len(reason) > MAX_TEXT_CHARS:
+            # The tombstone goes to every store: it has to stay small.
+            raise Invalid(f"reason is longer than {MAX_TEXT_CHARS} characters", op_id=op_id)
         try:
             require_utf8(reason, "reason")
         except Invalid as exc:

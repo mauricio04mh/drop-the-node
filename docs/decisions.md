@@ -953,6 +953,11 @@ La biblioteca del cliente es la interfaz para otro programa. Para usar el sistem
 
 Códigos de salida: 0 éxito (en las búsquedas, también si el resultado es incompleto, que se indica en la salida); 2 `Invalid`; 3 `NotFound`; 4 `Unavailable`; 5 `Conflict`; 1 cualquier otro final (una operación que todavía no existe o un error del propio programa), para que un guion no lo confunda con un resultado del contrato. Toda orden admite `--json`.
 
+**Conexión con los almacenes.** Cada orden se conecta a los almacenes que están en marcha en la máquina, en el espacio de nombres `DTN_RAY_NAMESPACE`, y comprueba que usan el mismo S y el mismo N (ver «Cómo sabe cada cliente qué almacenes existen»). Dos casos se distinguen a propósito:
+
+- **No hay almacenes en marcha:** `Unavailable` (código 4), con el mensaje de qué hay que arrancar. Para quien usa la orden, el sistema no responde, que es lo que significa `Unavailable`. No se intentó nada, así que no hay resultado incierto.
+- **Error de configuración** (un valor mal escrito, o un S o un N distintos de los de los almacenes): código 1, con la variable que falla. No es un resultado del contrato: reintentar no lo arregla, y un guion no debe confundirlo con `Unavailable`.
+
 **Eventos de una reproducción:** `started` (con el tiempo hasta empezar a sonar), `source_switch` (almacén abandonado, almacén nuevo y motivo), `stall_start` y `stall_end` (un corte y su duración), `finished` y `failed`. El resumen final da el número de cortes, su duración total, el número de cambios de fuente y los segmentos obtenidos de cada almacén. Son los datos que necesitan los experimentos.
 
 ---
@@ -1080,6 +1085,7 @@ La limpieza decide qué objetos no usa nadie y los borra (ver «Qué se hace con
 | `DTN_MIN_WRITE_MBPS` | 10 | Caudal mínimo de escritura que se espera de un disco sano, en MB/s; da el plazo de cada escritura según el tamaño del objeto. |
 | `DTN_GIVE_UP_SECONDS` | 30 | Tiempo máximo sin conseguir un fragmento antes de terminar con `Unavailable`. |
 | `DTN_DATA_DIR` | `./data` | Directorio donde cada almacén tiene su subdirectorio. |
+| `DTN_RAY_NAMESPACE` | `dtn` | Espacio de nombres de Ray donde viven los almacenes y el agente; todos los procesos de un mismo sistema usan el mismo. |
 | `DTN_STORE_CONCURRENCY` | 8 | Peticiones simultáneas por almacén. |
 | `DTN_UPLOAD_PARALLELISM` | 8 | Escrituras simultáneas durante una subida. |
 | `DTN_REPAIR_INTERVAL_SECONDS` | 30 | Periodo del agente de reparación. |
@@ -1091,6 +1097,8 @@ La limpieza decide qué objetos no usa nadie y los borra (ver «Qué se hace con
 | `DTN_WITHDRAW_TIMEOUT_SECONDS` | 30 | Plazo total de una retirada. |
 | `DTN_MAX_UPLOAD_SECONDS` | 1200 | Duración máxima del audio de una subida. |
 | `DTN_MAX_UPLOAD_BYTES` | 209715200 | Tamaño máximo del archivo subido (200 MB). |
+
+Todos se leen en un solo sitio y con la misma regla: una variable sin definir o vacía conserva su valor por defecto, y cualquier otro valor debe tener el formato correcto y pasar la validación antes de que el proceso haga nada. Cada componente recibe solo los parámetros que usa.
 
 Los valores por defecto son un punto de partida y se ajustarán con mediciones.
 

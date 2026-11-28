@@ -8,16 +8,22 @@
 
 Exit codes tell a script how the operation ended without reading text:
 0 success, 2 ``Invalid``, 3 ``NotFound``, 4 ``Unavailable`` (uncertain outcome
-on upload and withdraw), 5 ``Conflict``. Anything else (an operation that does
-not exist yet, a bug) exits with 1. Every command accepts ``--json``.
+on upload and withdraw; also when the stores are not running), 5 ``Conflict``.
+Anything else (a configuration error, an operation that does not exist yet, a
+bug) exits with 1. Every command accepts ``--json``.
+
+The commands talk to the stores started with ``python -m dtn.admin start``,
+through the Ray cluster running on this machine.
 """
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Callable, Sequence
 
 from dtn.client import Client, SearchResult
+from dtn.config import ConfigError, load_client_config, load_namespace, load_storage_config
 from dtn.errors import Conflict, DtnError, Invalid, NotFound, NotImplemented, Unavailable
 
 EXIT_OK = 0
@@ -28,8 +34,38 @@ ClientFactory = Callable[[], Client]
 
 
 def default_client() -> Client:
-    """Client wired to the real stores. Filled in when the Ray cluster exists (issue #5)."""
-    raise NotImplemented("replicated storage is not available yet")
+    """Client wired to the stores started with ``python -m dtn.admin start``.
+
+    Raises ``Unavailable`` if no Ray cluster or no stores are running here, and
+    ``ConfigError`` if the configuration is invalid or its S and N differ from
+    those of the running stores.
+    """
+    # Imported here so that the rest of the command, and its tests, run without Ray.
+    import ray
+
+    from dtn.ray_cluster import RayCluster
+
+    storage = load_storage_config()
+    config = load_client_config()
+    namespace = load_namespace()
+    if not ray.is_initialized():
+        try:
+            ray.init(address="auto", namespace=namespace, log_to_driver=False, logging_level=logging.ERROR)
+        except ConnectionError:
+            raise Unavailable(
+                "no Ray cluster is running on this machine: start one with `ray start --head`, "
+                "then the stores with `python -m dtn.admin start`"
+            ) from None
+    try:
+        cluster = RayCluster.connect(storage, namespace=namespace)
+    except ConfigError:
+        raise
+    except ValueError:  # a store actor does not exist
+        raise Unavailable(
+            f"the stores are not running in namespace {namespace!r}: "
+            "start them with `python -m dtn.admin start`"
+        ) from None
+    return Client(cluster, config)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -77,24 +113,28 @@ def _print_search(result: SearchResult, as_json: bool, out) -> None:
         return
     for t in result.tracks:
         print(f"{t.track_id}  {t.artist} — {t.title}  ({_format_duration(t.duration)}, {t.license})", file=out)
+    count = f"{len(result.tracks)} track{'' if len(result.tracks) == 1 else 's'}"
     if result.complete:
-        print(f"{len(result.tracks)} pistas · resultado completo", file=out)
+        print(f"{count} · complete result", file=out)
     else:
-        print(f"{len(result.tracks)} pistas · resultado INCOMPLETO: no respondieron "
-              f"{', '.join(result.unreachable)}", file=out)
+        print(f"{count} · INCOMPLETE result: no answer from {', '.join(result.unreachable)}", file=out)
 
 
 def _error_exit(exc: Exception, as_json: bool, err) -> int:
     code = next((c for cls, c in EXIT_CODES.items() if isinstance(exc, cls)), EXIT_OTHER)
     if isinstance(exc, DtnError):
         name, message, op_id = type(exc).__name__, exc.message, exc.op_id
+    elif isinstance(exc, ConfigError):
+        name, message, op_id = "ConfigError", str(exc), None
     else:
         name, message, op_id = "InternalError", repr(exc), None
     if as_json:
         print(json.dumps({"error": name, "message": message, "op_id": op_id}, ensure_ascii=False), file=err)
     else:
         suffix = f" [op {op_id}]" if op_id else ""
-        hint = " (resultado incierto: repetir es seguro)" if isinstance(exc, Unavailable) else ""
+        # Only an operation that started (it has an op_id) can leave an uncertain outcome.
+        uncertain = isinstance(exc, Unavailable) and op_id is not None
+        hint = " (uncertain outcome: repeating is safe)" if uncertain else ""
         print(f"error: {name}: {message}{suffix}{hint}", file=err)
     return code
 

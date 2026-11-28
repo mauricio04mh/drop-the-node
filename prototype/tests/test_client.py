@@ -6,7 +6,8 @@ import subprocess
 
 import pytest
 
-from dtn.client import Client, ClientConfig
+from dtn.client import Client
+from dtn.config import ClientConfig, load_client_config
 from dtn.errors import Conflict, Invalid, NotFound, Unavailable
 from dtn.fake_cluster import FakeCluster
 from dtn.ids import sha256_hex
@@ -250,7 +251,7 @@ def test_long_query_is_invalid(client):
 
 
 def test_config_from_env():
-    config = ClientConfig.from_env({"DTN_SEARCH_TIMEOUT_MS": "500", "DTN_UPLOAD_PARALLELISM": "2"})
+    config = load_client_config({"DTN_SEARCH_TIMEOUT_MS": "500", "DTN_UPLOAD_PARALLELISM": "2"})
     assert config.search_timeout_ms == 500 and config.upload_parallelism == 2
     assert config.upload_timeout_seconds == ClientConfig().upload_timeout_seconds
 
@@ -329,3 +330,10 @@ def test_a_failed_write_stops_the_remaining_ones(cluster, tmp_path):
     assert len(cluster.all_ids()) < 52  # not every object was written
     assert not any(isinstance(decode_object(d), Manifest)
                    for n in cluster.stores for d in cluster.store(n).objects.values())
+
+
+def test_reason_longer_than_the_text_limit_is_invalid(cluster, client, song):
+    track_id = client.upload(song, md())
+    with pytest.raises(Invalid):
+        client.withdraw(track_id, "x" * 201)
+    client.withdraw(track_id, "x" * 200)

@@ -230,7 +230,7 @@ Al terminar, la sesión da un resumen: tiempo hasta el inicio, número de cortes
 
 Retira una pista de forma definitiva, por ejemplo si se descubre que no tenía una licencia adecuada (ver «Cómo se retira una pista»).
 
-**Entrada:** `track_id` y `reason`, un texto no vacío que queda guardado en la lápida.
+**Entrada:** `track_id` y `reason`, un texto no vacío de como mucho 200 caracteres, en NFC y sin espacios en los extremos, que queda guardado en la lápida. El límite mantiene pequeñas las lápidas, que se copian a todos los almacenes.
 
 **Qué ocurre**
 
@@ -243,7 +243,7 @@ Retira una pista de forma definitiva, por ejemplo si se descubre que no tenía u
 | Resultado | Cuándo |
 |---|---|
 | `ok` | La lápida tiene al menos N réplicas, o la pista ya estaba retirada. |
-| `Invalid` | `track_id` mal formado o `reason` vacío. |
+| `Invalid` | `track_id` mal formado, o `reason` vacío o de más de 200 caracteres. |
 | `NotFound` | La pista no existe, con la misma regla que `play`. |
 | `Unavailable` | No se pudo guardar la lápida con N réplicas. **Resultado incierto:** la pista puede haber quedado retirada. Repetir es seguro. |
 
@@ -300,9 +300,9 @@ dtn withdraw TRACK_ID --reason MOTIVO
 | 0 | Éxito. En `search` y `list`, también si el resultado está incompleto, que se indica en la salida. |
 | 2 | `Invalid` |
 | 3 | `NotFound` |
-| 4 | `Unavailable` (en `upload` y `withdraw`, resultado incierto) |
+| 4 | `Unavailable` (en `upload` y `withdraw`, resultado incierto). También cuando no hay almacenes en marcha a los que conectarse: entonces no se intentó nada. |
 | 5 | `Conflict` |
-| 1 | Cualquier otro final: una operación que todavía no existe o un error del propio programa. |
+| 1 | Cualquier otro final: un error de configuración (por ejemplo, un S o un N distintos de los de los almacenes), una operación que todavía no existe o un error del propio programa. |
 
 Toda salida tiene también una versión en JSON (`--json`) para procesarla en los experimentos.
 

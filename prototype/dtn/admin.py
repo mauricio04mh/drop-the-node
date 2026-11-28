@@ -21,12 +21,19 @@ from datetime import datetime, timezone
 
 import ray
 
-from dtn.config import StorageConfig, check_cluster_params, load_storage_config
+from dtn.config import (
+    DEFAULT_NAMESPACE,
+    ConfigError,
+    StorageConfig,
+    check_cluster_params,
+    load_namespace,
+    load_storage_config,
+)
 from dtn.repair import ACTOR_NAME as REPAIR_NAME
 from dtn.repair import RepairActor, repair_options
 from dtn.store_actor import DEFAULT_CODEC, Codec, StoreActor, store_options
 
-NAMESPACE = "dtn"
+NAMESPACE = DEFAULT_NAMESPACE
 # Records S and N in DTN_DATA_DIR the first time the stores start.
 CLUSTER_FILE = "cluster.json"
 
@@ -41,7 +48,7 @@ def start_stores(
     """Start every store, or attach to the ones already running. Idempotent.
 
     Returns ``{logical name: actor handle}`` once every store answers a ping.
-    Raises ``ValueError`` if the data directory or the running stores use
+    Raises ``ConfigError`` if the data directory or the running stores use
     another S or N than ``config``.
     """
     # Workers may run in another directory: pass them an absolute path.
@@ -70,7 +77,7 @@ def claim_data_dir(config: StorageConfig) -> None:
     if path.exists():
         recorded = json.loads(path.read_text())
         if recorded != expected:
-            raise ValueError(
+            raise ConfigError(
                 f"{path} records {recorded}, but this process uses {expected}. "
                 "Start with the same DTN_NUM_STORES and DTN_REPLICAS, or use an empty DTN_DATA_DIR."
             )
@@ -141,7 +148,7 @@ def _now() -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dtn.admin", description=__doc__.splitlines()[0])
-    parser.add_argument("--namespace", default=NAMESPACE)
+    parser.add_argument("--namespace", default=None, help="Ray namespace (default: DTN_RAY_NAMESPACE or dtn)")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("start", help="start the stores")
     commands.add_parser("status", help="ping every store; last repair round")
@@ -151,7 +158,13 @@ def main(argv=None) -> int:
     commands.add_parser("stop", help="remove the stores and the agent")
     args = parser.parse_args(argv)
 
-    config = load_storage_config()
+    try:
+        config = load_storage_config()
+        if args.namespace is None:
+            args.namespace = load_namespace()
+    except ConfigError as e:
+        print(f"configuration error: {e}", file=sys.stderr)
+        return 1
     try:
         ray.init(address="auto", namespace=args.namespace, log_to_driver=False)
     except ConnectionError:
@@ -159,7 +172,11 @@ def main(argv=None) -> int:
         return 1
 
     if args.command == "start":
-        start_stores(config, namespace=args.namespace)
+        try:
+            start_stores(config, namespace=args.namespace)
+        except ConfigError as e:
+            print(f"configuration error: {e}", file=sys.stderr)
+            return 1
         start_repair(config, namespace=args.namespace)
         print(f"started {len(config.store_names)} stores and the repair agent in {config.data_dir.resolve()}")
         print(f"config {config.as_dict()}")

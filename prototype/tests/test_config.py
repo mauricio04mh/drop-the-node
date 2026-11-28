@@ -2,7 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from dtn.config import StorageConfig, check_cluster_params, load_storage_config
+from dtn.config import (
+    ClientConfig,
+    ConfigError,
+    StorageConfig,
+    check_cluster_params,
+    load_client_config,
+    load_namespace,
+    load_storage_config,
+)
 
 
 def test_defaults_match_the_documented_parameters():
@@ -81,3 +89,48 @@ def test_a_store_with_another_n_fails_the_check_and_is_named():
 
 def test_stores_that_did_not_answer_are_not_checked():
     check_cluster_params(StorageConfig(), {})
+
+
+# --- client configuration and shared reading rules -------------------------------
+
+
+def test_empty_variables_keep_the_default():
+    assert load_storage_config({"DTN_REPLICAS": "", "DTN_NUM_STORES": "  "}) == StorageConfig()
+    assert load_client_config({"DTN_UPLOAD_PARALLELISM": ""}) == ClientConfig()
+
+
+def test_client_defaults_match_the_documented_parameters():
+    config = load_client_config({})
+    assert (config.upload_timeout_seconds, config.search_timeout_ms, config.withdraw_timeout_seconds) == (
+        600,
+        2000,
+        30,
+    )
+    assert (config.upload_parallelism, config.segment_seconds, config.audio_bitrate) == (8, 2, "128k")
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"DTN_UPLOAD_PARALLELISM": "0"},
+        {"DTN_UPLOAD_PARALLELISM": "many"},
+        {"DTN_SEARCH_TIMEOUT_MS": "-1"},
+        {"DTN_AUDIO_BITRATE": "loud"},
+        {"DTN_MAX_UPLOAD_BYTES": "1.5"},
+    ],
+)
+def test_client_config_rejects_bad_values(env):
+    with pytest.raises(ConfigError):
+        load_client_config(env)
+
+
+def test_every_configuration_error_is_a_config_error():
+    with pytest.raises(ConfigError):
+        load_storage_config({"DTN_REPLICAS": "9"})
+    with pytest.raises(ConfigError, match="store-2"):
+        check_cluster_params(StorageConfig(), {"store-2": {"num_stores": 5, "replicas": 2}})
+
+
+def test_namespace_comes_from_the_environment():
+    assert load_namespace({}) == "dtn"
+    assert load_namespace({"DTN_RAY_NAMESPACE": "experiment"}) == "experiment"
