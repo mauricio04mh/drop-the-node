@@ -2,7 +2,7 @@
 /bin/
 
 # Runtime data written by nodes (recreated on every experiment)
-/data/
+data/
 
 # Raw logs; evidence worth keeping is copied to evidence/
 /logs/*.log

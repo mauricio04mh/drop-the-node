@@ -112,9 +112,19 @@ Para leer o escribir, un cliente necesita saber qué almacenes forman el sistema
 
 **Configuración estática de los nombres lógicos.** Con un conjunto pequeño y controlado de almacenes, una lista fija es más simple y más correcta que un registro o un protocolo de gossip, y no introduce ningún componente nuevo que pueda fallar. Los clientes trabajan siempre con el nombre lógico, nunca con el proceso o la dirección, de modo que un almacén reiniciado sigue siendo el mismo para todos.
 
+Cada proceso lee su configuración de su propio entorno, así que nada impide por sí solo que un cliente arranque con otro S u otro N. Con otro S calcularía otros órdenes de colocación; con otro N escribiría otro número de copias y decidiría mal entre `NotFound` y `Unavailable`. Por eso que todos usen los mismos valores se comprueba en vez de suponerse:
+
+1. Cada almacén informa en `ping` del S y el N con que arrancó. Al arrancar los almacenes, y al conectarse un cliente o el agente de reparación, se comparan con los propios y, si no coinciden, el proceso se niega a trabajar con un error que dice qué almacén discrepa.
+2. La carpeta de datos guarda S y N la primera vez que arrancan los almacenes, y arrancarlos después con otros valores se rechaza. Los datos sobreviven a los procesos: cambiar S reordenaría la colocación de todo lo guardado, y cambiar N cambiaría cuántas copias se esperan de cada objeto.
+
+Los demás parámetros pueden ser distintos en cada proceso: cada cliente tiene su propio detector de fallos, y el agente de reparación indica de forma explícita los segundos de cada borrado.
+
 | Tipo | Declaración |
 |---|---|
-| Supuesto | El conjunto de almacenes no cambia mientras el sistema funciona, y todos los clientes tienen la misma lista. |
+| Supuesto | El conjunto de almacenes no cambia mientras el sistema funciona. |
+| Corrección | Ningún proceso lee ni escribe con un S o un N distintos de los de los almacenes que le responden al conectarse. |
+| Límite | Un almacén que no responde al conectarse no se comprueba. |
+| Límite | Cambiar S o N exige empezar con una carpeta de datos vacía: no hay migración. |
 
 ---
 
@@ -763,16 +773,19 @@ Tras una caída, los objetos de ese almacén quedan con menos réplicas de las d
 
 **Anti-entropía periódica comparando inventarios.**
 
-1. Cada `DTN_REPAIR_INTERVAL_SECONDS`, y también cuando detecta que un almacén cayó o volvió, el agente de reparación pide su inventario a cada almacén vivo.
+1. Cada `DTN_REPAIR_INTERVAL_SECONDS`, cuando detecta que un almacén cayó o volvió, y cuando uno lleva `DTN_STORE_LOST_SECONDS` sin responder, el agente de reparación pide su inventario a cada almacén vivo.
 2. Para cada objeto calcula el orden de colocación.
 3. Si tiene menos de N réplicas, lo copia desde una réplica sana, comprobando su hash, en el primer almacén vivo del orden que no lo tenga. Las lápidas son la excepción: se copian a todos los almacenes vivos que no las tengan (ver «Cómo se retira una pista»).
-4. Escribir un objeto inmutable es idempotente, así que pueden trabajar varios agentes a la vez, o un agente y una subida, sin coordinarse.
+4. Un almacén que deja de responder no se da por perdido enseguida. Hasta que lleva `DTN_STORE_LOST_SECONDS` sin responder, siguen contando las réplicas de su último inventario; pasado ese plazo, se da por perdido y sus objetos se reponen en los siguientes del orden. Así, un almacén que se reinicia o vuelve tras una caída breve no provoca ninguna copia: sin el plazo, unos segundos de silencio copiaban todo lo que guardaba, una fracción N / S de todo el sistema, y esas copias quedaban de sobra cuando volvía. Hay dos excepciones, que se reponen en el acto porque no se sabe nada de ellas: lo escrito en el almacén después de su último inventario, y todo lo de un almacén que el agente nunca vio responder.
+5. No repone los objetos sin uso (ver «Qué se hace con los objetos que nadie usa»), salvo que algún almacén no haya respondido: entonces no puede saber qué objetos se usan y los repone todos. Si repusiera los objetos sin uso, cada ronda devolvería, con antigüedad nueva, las copias que la limpieza acaba de borrar, y nunca desaparecerían.
+6. Escribir un objeto inmutable es idempotente, así que pueden trabajar varios agentes a la vez, o un agente y una subida, sin coordinarse.
 
 El agente no está en el camino de las lecturas: si cae, el servicio sigue y solo se retrasa la reparación. Se reinicia igual que los almacenes.
 
 | Tipo | Declaración |
 |---|---|
-| Objetivo | Tras una caída, cada objeto vuelve a tener N réplicas en como mucho dos periodos de reparación, si quedan almacenes vivos suficientes. |
+| Objetivo | Tras perderse un almacén, cada objeto vuelve a tener N réplicas en como mucho `DTN_STORE_LOST_SECONDS` más dos periodos de reparación, si quedan almacenes vivos suficientes. |
+| Límite | Mientras un almacén calla sin darse por perdido, los objetos que guarda tienen una réplica menos: aguantan una caída más, no dos. |
 
 ---
 
@@ -987,7 +1000,7 @@ Una pista larga tiene cientos de segmentos. Escribirlos uno detrás de otro hace
 
 ### Decisión
 
-**En paralelo, con un máximo de `DTN_UPLOAD_PARALLELISM` escrituras simultáneas.** Cada escritura usa el plazo adaptativo de la lectura. El manifiesto se escribe solo cuando todo lo demás está confirmado.
+**En paralelo, con un máximo de `DTN_UPLOAD_PARALLELISM` escrituras simultáneas.** Cada escritura en un almacén tiene un plazo que depende del tamaño del objeto: el plazo adaptativo de la lectura más el tiempo que tardaría el disco a `DTN_MIN_WRITE_MBPS`. Si lo supera, el almacén pasa a sospechoso y la réplica se escribe también en el siguiente del orden; la escritura lenta sigue en curso y cuenta si termina antes. Un plazo fijo sospecharía de todos los almacenes con los objetos grandes, o esperaría demasiado con los pequeños: un almacén vivo pero colgado detendría la subida hasta su plazo total. La reparación usa el mismo plazo al copiar. El manifiesto se escribe solo cuando todo lo demás está confirmado.
 
 ---
 
@@ -1013,15 +1026,17 @@ Los objetos de una pista retirada, o de una subida abandonada, ocupan espacio in
 
 1. El agente de reparación marca todo objeto referenciado por algún manifiesto no retirado: sus segmentos, su segmento inicial y su original.
 2. Borra los objetos no marcados con más de `DTN_GC_GRACE_SECONDS` de antigüedad (ver «Cómo borra un almacén un objeto sin uso»).
-3. Escribir un objeto que ya existe renueva su antigüedad. Sin esto, una subida que reutiliza segmentos antiguos sin uso podría perderlos entre su escritura y la del manifiesto.
-4. La antigüedad se cuenta desde la última escritura o desde que arrancó el almacén, lo que sea más reciente, con un reloj monótono. No depende de la hora del sistema, que puede saltar hacia delante al corregirse y hacer que un objeto recién escrito parezca viejo, y no hay que guardarla en disco: tras un reinicio, todo objeto vuelve a empezar con antigüedad 0, que es la dirección segura.
-5. Los manifiestos y las lápidas de las pistas retiradas se conservan, para que la retirada siga siendo visible.
+3. Solo borra si respondieron todos los almacenes. Un manifiesto cuya única réplica está en un almacén que no responde no se conoce, y sus segmentos parecerían sin uso.
+4. Escribir un objeto que ya existe renueva su antigüedad. Sin esto, una subida que reutiliza segmentos antiguos sin uso podría perderlos entre su escritura y la del manifiesto.
+5. La antigüedad se cuenta desde la última escritura o desde que arrancó el almacén, lo que sea más reciente, con un reloj monótono. No depende de la hora del sistema, que puede saltar hacia delante al corregirse y hacer que un objeto recién escrito parezca viejo, y no hay que guardarla en disco: tras un reinicio, todo objeto vuelve a empezar con antigüedad 0, que es la dirección segura.
+6. Los manifiestos y las lápidas de las pistas retiradas se conservan, para que la retirada siga siendo visible.
 
 | Tipo | Declaración |
 |---|---|
 | Corrección | Un objeto referenciado por una pista vigente nunca se borra. |
 | Supuesto | Toda subida termina antes de `DTN_GC_GRACE_SECONDS`. |
 | Límite | Un almacén que se reinicia más a menudo que `DTN_GC_GRACE_SECONDS` no borra nada. |
+| Límite | Mientras algún almacén no responde, no se borra nada. |
 
 ---
 
@@ -1062,11 +1077,13 @@ La limpieza decide qué objetos no usa nadie y los borra (ver «Qué se hace con
 | `DTN_HEDGE_DELAY_MS` | sin fijar | Si se fija, sustituye al retraso adaptativo; `0` pide siempre a dos réplicas. |
 | `DTN_TIMEOUT_MIN_MS` | 200 | Mínimo del plazo de sospecha. |
 | `DTN_TIMEOUT_MAX_MS` | 2000 | Máximo del plazo de sospecha. |
+| `DTN_MIN_WRITE_MBPS` | 10 | Caudal mínimo de escritura que se espera de un disco sano, en MB/s; da el plazo de cada escritura según el tamaño del objeto. |
 | `DTN_GIVE_UP_SECONDS` | 30 | Tiempo máximo sin conseguir un fragmento antes de terminar con `Unavailable`. |
 | `DTN_DATA_DIR` | `./data` | Directorio donde cada almacén tiene su subdirectorio. |
 | `DTN_STORE_CONCURRENCY` | 8 | Peticiones simultáneas por almacén. |
 | `DTN_UPLOAD_PARALLELISM` | 8 | Escrituras simultáneas durante una subida. |
 | `DTN_REPAIR_INTERVAL_SECONDS` | 30 | Periodo del agente de reparación. |
+| `DTN_STORE_LOST_SECONDS` | 60 | Tiempo sin responder tras el cual un almacén se da por perdido y se reponen sus objetos. |
 | `DTN_SCRUB_INTERVAL_SECONDS` | 3600 | Periodo de la comprobación de integridad en segundo plano. |
 | `DTN_GC_GRACE_SECONDS` | 86400 | Antigüedad mínima de un objeto sin uso para borrarlo. |
 | `DTN_UPLOAD_TIMEOUT_SECONDS` | 600 | Plazo total de una subida. |

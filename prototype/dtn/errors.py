@@ -19,8 +19,11 @@ class DtnError(Exception):
         return {"op_id": self.op_id}
 
     def __reduce__(self):
-        # The default reduce only replays positional args, which would drop
-        # keyword-only fields when the error crosses a process boundary.
+        # The default reduce of Exception calls the class with self.args
+        # (the message alone) and then copies the attributes on top: __init__
+        # runs with default values, and a required keyword-only field would
+        # make the rebuild fail on the receiving side. Rebuild through
+        # __init__ with every field instead.
         return (_rebuild, (type(self), self.message, self._fields()))
 
     def __str__(self) -> str:
